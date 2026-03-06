@@ -60,13 +60,25 @@ describe("deriveUiStatus", () => {
     expect(deriveUiStatus(state, null)).toEqual({ status: "closed" });
   });
 
-  it("returns 'closed' when lifecycle is removed", () => {
+  it("returns 'closed' when lifecycle is removed and agent stopped", () => {
     const state = makeState({ lifecycle: "removed", agent: "stopped" });
     expect(deriveUiStatus(state, null)).toEqual({ status: "closed" });
   });
 
   it("returns 'running' when agent process is alive", () => {
     const state = makeState({ lifecycle: "active", agent: "running", linearStatus: "in_progress" });
+    expect(deriveUiStatus(state, null)).toEqual({ status: "running" });
+  });
+
+  it("returns 'running' even when lifecycle=removed if agent is still running (orphan cleanup bug)", () => {
+    // This is the UKR-126 bug: dispatcher cleaned up agent as orphan while Claude was running.
+    // UI must show "running" not "closed" when agent process is alive.
+    const state = makeState({ lifecycle: "removed", agent: "running", linearStatus: "in_progress" });
+    expect(deriveUiStatus(state, null)).toEqual({ status: "running" });
+  });
+
+  it("returns 'running' even when linearStatus=done if agent is still running", () => {
+    const state = makeState({ lifecycle: "active", agent: "running", linearStatus: "done" });
     expect(deriveUiStatus(state, null)).toEqual({ status: "running" });
   });
 
@@ -105,9 +117,14 @@ describe("deriveLegacyStatus", () => {
     expect(deriveLegacyStatus(state, op)).toBe("CLEANUP");
   });
 
-  it("maps lifecycle removed → REMOVED", () => {
-    const state = makeState({ lifecycle: "removed" });
+  it("maps lifecycle removed + agent stopped → REMOVED", () => {
+    const state = makeState({ lifecycle: "removed", agent: "stopped" });
     expect(deriveLegacyStatus(state, null)).toBe("REMOVED");
+  });
+
+  it("maps lifecycle removed + agent running → RUNNING (running takes priority)", () => {
+    const state = makeState({ lifecycle: "removed", agent: "running" });
+    expect(deriveLegacyStatus(state, null)).toBe("RUNNING");
   });
 
   it("maps linearStatus done → DONE", () => {
@@ -130,9 +147,14 @@ describe("deriveLegacyStatus", () => {
     expect(deriveLegacyStatus(state, null)).toBe("EXITED");
   });
 
-  it("REMOVED takes priority over DONE", () => {
-    const state = makeState({ lifecycle: "removed", linearStatus: "done" });
+  it("REMOVED takes priority over DONE (when agent stopped)", () => {
+    const state = makeState({ lifecycle: "removed", linearStatus: "done", agent: "stopped" });
     expect(deriveLegacyStatus(state, null)).toBe("REMOVED");
+  });
+
+  it("RUNNING takes priority over REMOVED and DONE", () => {
+    const state = makeState({ lifecycle: "removed", linearStatus: "done", agent: "running" });
+    expect(deriveLegacyStatus(state, null)).toBe("RUNNING");
   });
 
   it("operation takes priority over terminal states", () => {
@@ -155,7 +177,8 @@ describe("legacy ↔ ui status consistency", () => {
   const cases: Array<{ desc: string; state: AgentState; op: CurrentOperation | null }> = [
     { desc: "done agent", state: makeState({ linearStatus: "done", lifecycle: "active" }), op: null },
     { desc: "cancelled agent", state: makeState({ linearStatus: "cancelled", lifecycle: "active" }), op: null },
-    { desc: "removed agent", state: makeState({ lifecycle: "removed" }), op: null },
+    { desc: "removed agent (stopped)", state: makeState({ lifecycle: "removed", agent: "stopped" }), op: null },
+    { desc: "removed agent (still running)", state: makeState({ lifecycle: "removed", agent: "running" }), op: null },
     { desc: "closing (mergeAndClose)", state: makeState(), op: { name: "mergeAndClose", startedAt: "" } },
     { desc: "closing (remove)", state: makeState(), op: { name: "remove", startedAt: "" } },
     { desc: "active awaiting", state: makeState({ lifecycle: "active", agent: "stopped", linearStatus: "in_progress" }), op: null },
@@ -763,7 +786,102 @@ describe("checkGitInContainer branch name", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 13. local-branches route must use aggregate git state, not stale clone
+// 13. cleanupOrphans — must never clean up running or spawning agents
+// ---------------------------------------------------------------------------
+
+describe("cleanupOrphans safety", () => {
+  // Extracted decision logic from dispatcher.ts cleanupOrphans
+  function shouldCleanup(agent: {
+    status: string;
+    state?: { agent: string; lifecycle: string };
+    issueId: string;
+  }, activeIssueIds: string[]): boolean {
+    const TERMINAL = new Set(["DONE", "CANCELLED", "REMOVED", "CLEANUP"]);
+    if (TERMINAL.has(agent.status)) return false;
+    if (activeIssueIds.includes(agent.issueId)) return false;
+    if (agent.state?.agent === "running") return false;
+    if (agent.state?.lifecycle === "spawning") return false;
+    return true;
+  }
+
+  it("does NOT clean up agents that are actively running", () => {
+    // This is the UKR-126 bug: Linear query returned only 50 issues,
+    // UKR-126 was not in the list → treated as orphan → removeAgent() while Claude was running
+    const agent = {
+      status: "RUNNING",
+      state: { agent: "running", lifecycle: "active" },
+      issueId: "UKR-126",
+    };
+    expect(shouldCleanup(agent, [])).toBe(false);
+  });
+
+  it("does NOT clean up agents that are spawning", () => {
+    const agent = {
+      status: "SPAWNING",
+      state: { agent: "stopped", lifecycle: "spawning" },
+      issueId: "UKR-130",
+    };
+    expect(shouldCleanup(agent, [])).toBe(false);
+  });
+
+  it("does NOT clean up already-terminal agents", () => {
+    for (const status of ["DONE", "CANCELLED", "REMOVED", "CLEANUP"]) {
+      const agent = { status, state: { agent: "stopped", lifecycle: "removed" }, issueId: "UKR-1" };
+      expect(shouldCleanup(agent, [])).toBe(false);
+    }
+  });
+
+  it("does NOT clean up agents present in Linear query results", () => {
+    const agent = {
+      status: "EXITED",
+      state: { agent: "stopped", lifecycle: "active" },
+      issueId: "UKR-126",
+    };
+    expect(shouldCleanup(agent, ["UKR-126"])).toBe(false);
+  });
+
+  it("DOES clean up stopped agents not in Linear and not terminal", () => {
+    const agent = {
+      status: "EXITED",
+      state: { agent: "stopped", lifecycle: "active" },
+      issueId: "UKR-OLD",
+    };
+    expect(shouldCleanup(agent, ["UKR-1", "UKR-2"])).toBe(true);
+  });
+
+  it("handles agents without aggregate state (legacy)", () => {
+    const agent = {
+      status: "EXITED",
+      state: undefined,
+      issueId: "UKR-OLD",
+    };
+    // No state → agent is not "running" → can be cleaned
+    expect(shouldCleanup(agent, [])).toBe(true);
+  });
+
+  it("handles Linear query returning fewer than total issues (first:50 limit)", () => {
+    // Simulate: 60 issues exist, Linear returns first 50
+    const linearResults = Array.from({ length: 50 }, (_, i) => `UKR-${i + 1}`);
+    // Agent #55 is not in results but IS running
+    const runningAgent = {
+      status: "RUNNING",
+      state: { agent: "running", lifecycle: "active" },
+      issueId: "UKR-55",
+    };
+    expect(shouldCleanup(runningAgent, linearResults)).toBe(false);
+
+    // Agent #55 is not in results and IS stopped — should be cleaned
+    const stoppedAgent = {
+      status: "EXITED",
+      state: { agent: "stopped", lifecycle: "active" },
+      issueId: "UKR-55",
+    };
+    expect(shouldCleanup(stoppedAgent, linearResults)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 14. local-branches route must use aggregate git state, not stale clone
 // ---------------------------------------------------------------------------
 
 describe("local-branches git state source", () => {

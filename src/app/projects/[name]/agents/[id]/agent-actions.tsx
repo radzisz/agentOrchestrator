@@ -10,9 +10,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { GitMerge, Ban, Trash2, AlertTriangle, Loader2 } from "lucide-react";
+import { GitMerge, Ban, Trash2, AlertTriangle, Loader2, RotateCcw } from "lucide-react";
 
-type DialogType = "merge" | "reject" | "remove" | null;
+type DialogType = "merge" | "reject" | "remove" | "restore" | null;
 
 interface DirtyInfo {
   loading: boolean;
@@ -45,18 +45,27 @@ export function AgentActions({
   const [ignoreSelection, setIgnoreSelection] = useState<Set<string>>(new Set());
   const [commitMsg, setCommitMsg] = useState("");
 
+  // Restore dialog state
+  const [restoreBranches, setRestoreBranches] = useState<{ agentBranch: string | null; defaultBranch: string } | null>(null);
+  const [restoreBranchesLoading, setRestoreBranchesLoading] = useState(false);
+  const [restoreFromBranch, setRestoreFromBranch] = useState<string>("");
+  const [restoreSetInProgress, setRestoreSetInProgress] = useState(true);
+
   // Listen for dialog triggers from NextSteps (agent-state-panel.tsx)
   useEffect(() => {
     function handleOpenMerge() { openConfirm("merge"); }
     function handleOpenReject() { openConfirm("reject"); }
     function handleOpenRemove() { openConfirm("remove"); }
+    function handleOpenRestore() { openRestoreDialog(); }
     window.addEventListener("open-merge-dialog", handleOpenMerge);
     window.addEventListener("open-reject-dialog", handleOpenReject);
     window.addEventListener("open-remove-dialog", handleOpenRemove);
+    window.addEventListener("open-restore-dialog", handleOpenRestore);
     return () => {
       window.removeEventListener("open-merge-dialog", handleOpenMerge);
       window.removeEventListener("open-reject-dialog", handleOpenReject);
       window.removeEventListener("open-remove-dialog", handleOpenRemove);
+      window.removeEventListener("open-restore-dialog", handleOpenRestore);
     };
   }, []);
 
@@ -70,6 +79,39 @@ export function AgentActions({
       setDirty({ loading: false, hasUncommitted: false, files: [] });
     }
   }, [agentId]);
+
+  async function openRestoreDialog() {
+    setOpenDialog("restore");
+    setRestoreBranchesLoading(true);
+    setRestoreBranches(null);
+    try {
+      const resp = await fetch(`/api/agents/${agentId}/branches`);
+      const data = await resp.json();
+      setRestoreBranches(data);
+      // Default to agent branch if it exists, otherwise default branch
+      setRestoreFromBranch(data.agentBranch || data.defaultBranch);
+    } catch {
+      setRestoreBranches({ agentBranch: null, defaultBranch: "main" });
+      setRestoreFromBranch("main");
+    } finally {
+      setRestoreBranchesLoading(false);
+    }
+  }
+
+  async function handleRestore() {
+    setActionLoading(true);
+    try {
+      await fetch(`/api/agents/${agentId}/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fromBranch: restoreFromBranch, setInProgress: restoreSetInProgress }),
+      });
+      setOpenDialog(null);
+      window.location.reload();
+    } finally {
+      setActionLoading(false);
+    }
+  }
 
   function openConfirm(type: DialogType) {
     setOpenDialog(type);
@@ -454,6 +496,82 @@ export function AgentActions({
                 <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Removing...</>
               ) : (
                 <><Trash2 className="h-4 w-4 mr-1" /> Remove agent</>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Restore Dialog ── */}
+      <Dialog open={openDialog === "restore"} onOpenChange={(o) => !o && setOpenDialog(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <RotateCcw className="h-5 w-5 text-blue-500" />
+              Restore agent
+            </DialogTitle>
+            <DialogDescription>
+              Re-clone the repository and restart the agent from an existing branch.
+            </DialogDescription>
+          </DialogHeader>
+
+          {restoreBranchesLoading ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Checking available branches...
+            </div>
+          ) : restoreBranches ? (
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <p className="text-sm font-medium">Branch to restore from:</p>
+                {restoreBranches.agentBranch && (
+                  <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                    <input
+                      type="radio"
+                      name="restoreBranch"
+                      checked={restoreFromBranch === restoreBranches.agentBranch}
+                      onChange={() => setRestoreFromBranch(restoreBranches.agentBranch!)}
+                      className="rounded-full"
+                    />
+                    <code className="bg-muted px-1.5 py-0.5 rounded text-xs">{restoreBranches.agentBranch}</code>
+                    <span className="text-muted-foreground">(agent branch)</span>
+                  </label>
+                )}
+                <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                  <input
+                    type="radio"
+                    name="restoreBranch"
+                    checked={restoreFromBranch === restoreBranches.defaultBranch}
+                    onChange={() => setRestoreFromBranch(restoreBranches.defaultBranch)}
+                    className="rounded-full"
+                  />
+                  <code className="bg-muted px-1.5 py-0.5 rounded text-xs">{restoreBranches.defaultBranch}</code>
+                  <span className="text-muted-foreground">(default branch)</span>
+                </label>
+                {!restoreBranches.agentBranch && (
+                  <p className="text-xs text-muted-foreground">
+                    Agent branch not found on remote. It may have been deleted.
+                  </p>
+                )}
+              </div>
+
+              <CleanupCheckbox
+                checked={restoreSetInProgress}
+                onChange={setRestoreSetInProgress}
+                label="Set Linear status to In Progress"
+              />
+            </div>
+          ) : null}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpenDialog(null)} disabled={actionLoading}>
+              Cancel
+            </Button>
+            <Button onClick={handleRestore} disabled={actionLoading || restoreBranchesLoading || !restoreFromBranch}>
+              {actionLoading ? (
+                <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Restoring...</>
+              ) : (
+                <><RotateCcw className="h-4 w-4 mr-1" /> Restore agent</>
               )}
             </Button>
           </DialogFooter>

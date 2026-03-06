@@ -19,6 +19,7 @@ export function deriveLegacyStatus(
   if (op) {
     switch (op.name) {
       case "spawn":
+      case "restore":
         return "SPAWNING";
       case "rebase":
         return "REBASING";
@@ -34,6 +35,10 @@ export function deriveLegacyStatus(
     }
   }
 
+  // Agent actively running takes priority over terminal lifecycle
+  // (agent may be running even if lifecycle was incorrectly set)
+  if (state.agent === "running") return "RUNNING";
+
   // Lifecycle terminal states
   if (state.lifecycle === "removed") return "REMOVED";
 
@@ -48,9 +53,6 @@ export function deriveLegacyStatus(
   // Git operations in progress (without currentOperation — e.g. stuck state)
   if (state.git.op === "rebasing") return "REBASING";
   if (state.git.op === "merging") return "MERGING";
-
-  // Agent process state
-  if (state.agent === "running") return "RUNNING";
 
   // Agent stopped but lifecycle active
   return "EXITED";

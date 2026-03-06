@@ -209,6 +209,7 @@ function deriveNextSteps(
       mergeAndClose: "Merging and closing",
       reject: "Rejecting",
       remove: "Removing agent",
+      restore: "Restoring agent",
       spawn: "Spawning agent",
       wake: "Waking agent",
       rebase: "Rebasing",
@@ -258,6 +259,15 @@ function deriveNextSteps(
       type: "info",
       icon: <CheckCircle className="h-3.5 w-3.5" />,
       text: label,
+    });
+    // Restore action
+    steps.push({
+      key: "restore",
+      type: "action",
+      icon: <RotateCcw className="h-3.5 w-3.5" />,
+      text: "Restore agent from git history.",
+      buttonLabel: "Restore",
+      onClick: () => { window.dispatchEvent(new Event("open-restore-dialog")); },
     });
     // Edge case: container still exists even though lifecycle says removed
     if (state.container !== "missing") {

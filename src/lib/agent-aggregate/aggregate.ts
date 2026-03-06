@@ -202,6 +202,141 @@ export class AgentAggregate {
     });
   }
 
+  /** Restore a removed agent: re-clone from git, create container, launch Claude. */
+  async restoreAgent(opts: {
+    fromBranch: string;
+    setInProgress?: boolean;
+  }): Promise<void> {
+    return this.withLock("restore", async (setProgress) => {
+      if (this.state.lifecycle !== "removed") {
+        throw new Error(`Agent ${this.issueId} is not removed (lifecycle=${this.state.lifecycle})`);
+      }
+
+      const cfg = store.getProjectConfig(this.projectPath);
+      const agentDir = join(this.projectPath, ".10timesdev", "agents", this.issueId);
+
+      // Reset state
+      this.state.lifecycle = "spawning";
+      this.state.container = "missing";
+      this.state.agent = "stopped";
+      this.state.git.merged = false;
+      this.state.git.op = "idle";
+      this._agent.agentDir = agentDir;
+      this._agent.branch = `agent/${this.issueId}`;
+      this._agent.containerName = `agent-${this.issueId}`;
+
+      if (opts.setInProgress) {
+        this.state.linearStatus = "in_progress";
+      }
+
+      // Allocate port
+      const ports = portManager.allocate(this.projectName, this.issueId);
+      this._agent.portSlot = ports.slot;
+
+      this.persist();
+
+      try {
+        // Clone repo — create a minimal issue-like object for cloneRepo
+        setProgress("cloning repository");
+        const fakeIssue = {
+          id: this._agent.linearIssueUuid || "",
+          identifier: this.issueId,
+          title: this._agent.title || this.issueId,
+          description: this._agent.description || "",
+          priority: 0,
+          state: { name: "In Progress" },
+          labels: { nodes: [] },
+          comments: { nodes: [] },
+          creator: null,
+          assignee: null,
+        } as any;
+        await gitOps.cloneRepo(this._agent, this.projectPath, fakeIssue, this.state);
+
+        // Checkout the chosen branch if it's not the default
+        const defaultBranch = await this.getDefaultBranch();
+        if (opts.fromBranch !== defaultBranch) {
+          setProgress("checking out branch");
+          await gitOps.checkoutBranch(agentDir, opts.fromBranch);
+        }
+
+        // Copy .env if exists
+        const envFile = join(this.projectPath, ".env");
+        if (existsSync(envFile)) {
+          writeFileSync(join(agentDir, ".env"), readFileSync(envFile));
+        }
+
+        // Install dependencies
+        setProgress("installing dependencies");
+        if (existsSync(join(agentDir, "pnpm-lock.yaml"))) {
+          await cmd.run("pnpm install --frozen-lockfile", { cwd: agentDir, source: "agent-aggregate", timeout: 120000 });
+        } else if (existsSync(join(agentDir, "package-lock.json"))) {
+          await cmd.run("npm ci", { cwd: agentDir, source: "agent-aggregate", timeout: 120000 });
+        }
+
+        // Ensure orchestrator files are git-ignored
+        this.ensureGitIgnored(agentDir, [".10timesdev", "agent-output.log", ".agent-container", "messages.jsonl"]);
+
+        // Write task & claude files
+        setProgress("writing task files");
+        const tenxDir = join(agentDir, ".10timesdev");
+        if (!existsSync(tenxDir)) mkdirSync(tenxDir, { recursive: true });
+
+        // Write TASK.md (simple version — no Linear fetch needed)
+        const taskMdPath = join(tenxDir, "TASK.md");
+        if (!existsSync(taskMdPath)) {
+          writeFileSync(taskMdPath, `# ${this.issueId}: ${this._agent.title || "Task"}\n\n${this._agent.description || ""}\n`, "utf-8");
+        }
+        this.writeClaudeMd(agentDir, ports);
+
+        // Update Linear status if requested
+        if (opts.setInProgress && this._agent.linearIssueUuid && cfg.LINEAR_API_KEY) {
+          setProgress("updating Linear status");
+          try {
+            const inProgressId = await linear.getWorkflowStateId(
+              cfg.LINEAR_API_KEY,
+              cfg.LINEAR_TEAM_KEY,
+              "In Progress",
+            );
+            if (inProgressId) {
+              await linear.updateIssueState(cfg.LINEAR_API_KEY, this._agent.linearIssueUuid, inProgressId);
+            }
+          } catch {
+            // best effort
+          }
+        }
+
+        // Create container
+        setProgress("creating Docker container");
+        await containerOps.createContainer(this._agent, this.projectPath, this.state);
+
+        // Launch Claude
+        setProgress("launching Claude");
+        const prompt = "Read .10timesdev/TASK.md and .10timesdev/CLAUDE.md. Continue working on the task. When done, comment on Linear.";
+        await agentProcessOps.startAgentProcess(this._agent, this.projectPath, this.state, prompt);
+
+        this.state.lifecycle = "active";
+        this._agent.spawned = true;
+        this.persist();
+
+        this.opLog("restore", `restored from branch=${opts.fromBranch} slot=${ports.slot}`);
+        eventBus.emit("agent:spawned", {
+          agentId: this.issueId,
+          issueId: this.issueId,
+          projectName: this.projectName,
+          containerName: `agent-${this.issueId}`,
+          branch: `agent/${this.issueId}`,
+        });
+      } catch (error) {
+        const safeMsg = sanitizeError(error);
+        this.state.agent = "stopped";
+        this.state.lifecycle = "active";
+        this.persist();
+        this.opLog("restore", `error: ${safeMsg}`);
+        throw new Error(safeMsg);
+      }
+    });
+  }
+
   /** Wake agent: ensure container alive → start Claude process. */
   async wakeAgent(message?: string, opts?: { reset?: boolean }): Promise<void> {
     return this.withLock("wake", async (setProgress) => {
@@ -307,10 +442,10 @@ export class AgentAggregate {
   /** Refresh all state axes by checking actual system state.
    *  Silent — does NOT set currentOperation (internal housekeeping, not user-facing).
    *  Debounced: concurrent callers share the same promise; won't run more than once per 10s. */
-  async refreshAgent(): Promise<void> {
-    // Debounce: skip if last refresh was <10s ago
+  async refreshAgent(opts?: { force?: boolean }): Promise<void> {
+    // Debounce: skip if last refresh was <10s ago (unless forced)
     const now = Date.now();
-    if (now - this._lastRefreshAt < 10_000) return;
+    if (!opts?.force && now - this._lastRefreshAt < 10_000) return;
 
     // Coalesce: if already running, return existing promise
     if (this._refreshPromise) return this._refreshPromise;
@@ -340,6 +475,13 @@ export class AgentAggregate {
     // If branch is merged but Linear still shows in_progress → mark as done
     if (this.state.git.merged && this.state.linearStatus === "in_progress") {
       this.state.linearStatus = "done";
+    }
+
+    // Reconcile impossible states left by interrupted operations (e.g. orphan cleanup bug):
+    // agent=running but container=missing → force agent stopped (can't run without container)
+    if (this.state.agent === "running" && this.state.container !== "running") {
+      this.state.agent = "stopped";
+      this.opLog("lifecycle", `forced agent=stopped: container=${this.state.container}`);
     }
 
     this.persist();
@@ -555,6 +697,21 @@ export class AgentAggregate {
 
   // --- Internal ---
 
+  private async getDefaultBranch(): Promise<string> {
+    try {
+      const git = simpleGit(this.projectPath);
+      const ref = await git.raw(["symbolic-ref", "refs/remotes/origin/HEAD"]);
+      return ref.trim().replace("refs/remotes/origin/", "");
+    } catch {
+      try {
+        await simpleGit(this.projectPath).raw(["rev-parse", "--verify", "origin/main"]);
+        return "main";
+      } catch {
+        return "master";
+      }
+    }
+  }
+
   private persist(): void {
     store.saveAgent(this.projectPath, this.issueId, this._agent);
   }
@@ -569,6 +726,7 @@ export class AgentAggregate {
     mergeAndClose: 600_000,  // 10 min (merge + linear + cleanup)
     remove: 300_000,         // 5 min (stop services + remove container + remove repo)
     spawn: 300_000,          // 5 min (clone + build container + start)
+    restore: 300_000,        // 5 min (clone + checkout + build container + start)
     rebase: 300_000,         // 5 min
   };
   private static readonly DEFAULT_TIMEOUT_MS = 120_000; // 2 min

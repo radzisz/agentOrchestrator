@@ -25,8 +25,8 @@ export async function POST(
   const changes: string[] = [];
 
   if (agg) {
-    // Use aggregate's refreshAgent to reconcile all state axes
-    await agg.refreshAgent();
+    // Use aggregate's refreshAgent to reconcile all state axes (bypass debounce)
+    await agg.refreshAgent({ force: true });
     const newStatus = agg.getLegacyStatus();
     if (newStatus !== oldStatus) {
       changes.push(`${oldStatus} → ${newStatus} (via refreshAgent)`);

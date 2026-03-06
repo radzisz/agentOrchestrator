@@ -2,7 +2,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Loader2, Play } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Loader2, Play, AlertTriangle } from "lucide-react";
 
 interface RemoteRuntimeInfo {
   id: string;
@@ -150,6 +158,8 @@ export function RemotePreviewBar({
               <StopButton
                 onStop={handleStop}
                 isStopping={busy === "stopping"}
+                supabaseUrl={runtime.supabaseUrl}
+                branch={branch}
               />
             )}
           </>
@@ -167,7 +177,7 @@ export function RemotePreviewBar({
             >
               Retry
             </Button>
-            <StopButton onStop={handleStop} isStopping={busy === "stopping"} />
+            <StopButton onStop={handleStop} isStopping={busy === "stopping"} supabaseUrl={runtime.supabaseUrl} branch={branch} />
           </>
         )}
       </div>
@@ -260,36 +270,72 @@ function TTLCountdown({ expiresAt, onExtend, extending }: {
   );
 }
 
-function StopButton({ onStop, isStopping }: { onStop: () => void; isStopping: boolean }) {
-  const [confirming, setConfirming] = useState(false);
-
-  useEffect(() => {
-    if (!confirming) return;
-    const timer = setTimeout(() => setConfirming(false), 3000);
-    return () => clearTimeout(timer);
-  }, [confirming]);
-
-  function handleClick() {
-    if (!confirming) {
-      setConfirming(true);
-      return;
-    }
-    setConfirming(false);
-    onStop();
-  }
-
-  if (confirming) {
-    return (
-      <Button variant="destructive" size="sm" className="h-5 text-[10px] px-2" onClick={handleClick} disabled={isStopping}>
-        DB will be deleted — confirm?
-      </Button>
-    );
-  }
+function StopButton({ onStop, isStopping, supabaseUrl, branch }: {
+  onStop: () => void;
+  isStopping: boolean;
+  supabaseUrl?: string | null;
+  branch?: string;
+}) {
+  const [open, setOpen] = useState(false);
 
   return (
-    <Button variant="ghost" size="sm" className="h-5 text-[10px] px-2 text-muted-foreground" onClick={handleClick} disabled={isStopping}>
-      Stop
-    </Button>
+    <>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-5 text-[10px] px-2 text-muted-foreground"
+        onClick={() => setOpen(true)}
+        disabled={isStopping}
+      >
+        Stop
+      </Button>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-destructive" />
+              Stop remote preview
+            </DialogTitle>
+            <DialogDescription>
+              This will permanently remove all remote preview resources for branch{" "}
+              <code className="bg-muted px-1 rounded">{branch}</code>.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            {supabaseUrl && (
+              <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 space-y-1">
+                <p className="text-sm font-medium text-destructive">Supabase branch will be deleted</p>
+                <p className="text-sm text-muted-foreground">
+                  Database <code className="bg-muted px-1 rounded text-foreground">{supabaseUrl}</code> and all its data will be <span className="font-medium text-destructive">permanently removed</span>. This cannot be undone.
+                </p>
+              </div>
+            )}
+
+            <div className="rounded-md border border-border bg-muted/50 p-3">
+              <p className="text-sm text-muted-foreground">
+                Netlify branch deploys will be stopped. The deploy URLs will no longer be accessible.
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => { setOpen(false); onStop(); }}
+              disabled={isStopping}
+            >
+              {isStopping && <Loader2 className="h-4 w-4 animate-spin mr-1" />}
+              Delete & Stop
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

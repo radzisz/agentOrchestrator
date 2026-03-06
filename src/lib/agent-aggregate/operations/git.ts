@@ -480,6 +480,13 @@ export async function mergeRepo(
   }
 }
 
+/** Checkout a specific branch in agent directory (used by restore). */
+export async function checkoutBranch(agentDir: string, branch: string): Promise<void> {
+  const git = simpleGit(agentDir);
+  await git.fetch("origin", branch);
+  await git.checkout(branch);
+}
+
 /** Push agent branch with --force. */
 export async function pushRepo(
   agent: store.AgentData,

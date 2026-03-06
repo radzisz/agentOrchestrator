@@ -49,13 +49,19 @@ export function deriveUiStatus(
   op: CurrentOperation | null,
 ): UiState {
   // Starting: spawn or wake in progress
-  if (op && (op.name === "spawn" || op.name === "wake")) {
+  if (op && (op.name === "spawn" || op.name === "wake" || op.name === "restore")) {
     return { status: "starting" };
   }
 
   // Closing: merge, reject, or remove in progress
   if (op && (op.name === "mergeAndClose" || op.name === "reject" || op.name === "remove")) {
     return { status: "closing" };
+  }
+
+  // Running: agent process alive — takes priority over terminal lifecycle
+  // (agent may be running even if lifecycle was incorrectly set to removed)
+  if (state.agent === "running") {
+    return { status: "running" };
   }
 
   // Closed: terminal states
@@ -65,11 +71,6 @@ export function deriveUiStatus(
     state.lifecycle === "removed"
   ) {
     return { status: "closed" };
-  }
-
-  // Running: agent process alive
-  if (state.agent === "running") {
-    return { status: "running" };
   }
 
   // Awaiting: agent stopped but lifecycle active
