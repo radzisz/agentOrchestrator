@@ -68,6 +68,12 @@ async function doCheck(): Promise<void> {
       if (!["RUNNING", "EXITED"].includes(agent.status)) return;
       if (!agent.agentDir || !existsSync(`${agent.agentDir}/.git`)) return;
 
+      // Seed lastSeen from persisted state so we don't re-emit after server restart
+      const commitKey = `${project.name}/${agent.issueId}`;
+      if (!lastSeen.has(commitKey) && agent.state?.git?.lastCommit?.sha) {
+        lastSeen.set(commitKey, agent.state.git.lastCommit.sha);
+      }
+
       // Skip if aggregate already in terminal state (prevents re-processing loops)
       const existingAgg = tryGetAggregate(project.name, agent.issueId);
       if (existingAgg) {
@@ -141,6 +147,9 @@ async function doCheck(): Promise<void> {
             if (agg) {
               agg.state.linearStatus = "done";
               agg.state.agent = "stopped";
+            }
+            if (agent.state) {
+              agent.state.linearStatus = "done";
             }
             agent.status = "DONE";
             agent.updatedAt = new Date().toISOString();
@@ -259,6 +268,12 @@ async function detectExternalMerges(
       if (isMerged) {
         cmd.logInfo(SRC, `${agent.issueId}: branch ${agent.branch} merged into ${defaultBranch} externally → DONE`);
 
+        // Update aggregate so the guard on line 72-76 prevents re-processing
+        const agg = tryGetAggregate(project.name, agent.issueId);
+        if (agg) {
+          agg.state.linearStatus = "done";
+          agg.state.git.merged = true;
+        }
         if (agent.state) {
           agent.state.linearStatus = "done";
           agent.state.git.merged = true;

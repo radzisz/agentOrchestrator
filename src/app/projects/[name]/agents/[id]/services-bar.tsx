@@ -9,6 +9,7 @@ interface ServiceConfig {
   name: string;
   cmd: string;
   port: number;
+  portVar?: string;
 }
 
 export function ServicesBar({
@@ -26,7 +27,7 @@ export function ServicesBar({
 }) {
   const [enabled, setEnabled] = useState(initialEnabled);
   const [runtimeStatus, setRuntimeStatus] = useState<string>("STOPPED");
-  const [serviceLinks, setServiceLinks] = useState<Array<{ name: string; hostPort: number; healthPath?: string }>>([]);
+  const [serviceLinks, setServiceLinks] = useState<Array<{ name: string; hostPort: number; healthPath?: string; portVar?: string }>>([]);
   const [error, setError] = useState<string | null>(null);
   const [toggling, setToggling] = useState(false);
   const togglingRef = useRef(false);
@@ -242,14 +243,24 @@ export function ServicesBar({
       {/* Config details (expandable) */}
       {configOpen && (
         <div className="pl-4 space-y-0.5">
-          {cfgServices.map((svc) => (
-            <div key={svc.name} className="flex items-center gap-2 text-[10px] text-muted-foreground">
-              <span className="font-mono">{svc.name}</span>
-              <span className="opacity-50">→</span>
-              <span className="font-mono opacity-75 truncate">{svc.cmd}</span>
-              <span className="opacity-50">:{svc.port}</span>
-            </div>
-          ))}
+          {cfgServices.map((svc) => {
+            // Find matching live service link to show assigned port for portVar
+            const liveLink = serviceLinks.find(l => l.name === svc.name);
+            return (
+              <div key={svc.name} className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                <span className="font-mono">{svc.name}</span>
+                <span className="opacity-50">→</span>
+                <span className="font-mono opacity-75 truncate">{svc.cmd}</span>
+                {svc.portVar && liveLink ? (
+                  <span className="font-mono text-green-400">{svc.portVar}={liveLink.hostPort}</span>
+                ) : svc.portVar ? (
+                  <span className="font-mono opacity-50">{svc.portVar}</span>
+                ) : (
+                  <span className="opacity-50">:{svc.port}</span>
+                )}
+              </div>
+            );
+          })}
           <a
             href={`/projects/${projectName}#runtime`}
             className="inline-block text-[10px] text-muted-foreground hover:text-foreground underline mt-1"

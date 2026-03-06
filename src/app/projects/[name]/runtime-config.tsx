@@ -15,6 +15,7 @@ export interface RuntimeConfigData {
     cmd: string;         // e.g. "npm -w @ukryteskarby-pl/app_guide run dev:noWatch"
     port: number;        // port inside container, e.g. 3000, 3001, 3002
     healthPath?: string; // path for health check, e.g. "/guide" (default: "/")
+    portVar?: string;    // env var name for host-mode dynamic port, e.g. "PORT_NUMBER_GUIDE"
   }>;
 }
 
@@ -216,7 +217,7 @@ export function RuntimeConfig({
             {config.services.map((svc, idx) => (
               <div
                 key={idx}
-                className="grid grid-cols-[1fr_3fr_1fr_auto] gap-2 items-center"
+                className="grid grid-cols-[1fr_3fr_1.2fr_1fr_auto] gap-2 items-center"
               >
                 <input
                   className="px-2 py-1 text-sm border rounded bg-background"
@@ -229,6 +230,13 @@ export function RuntimeConfig({
                   value={svc.cmd}
                   onChange={(e) => updateService(idx, "cmd", e.target.value)}
                   placeholder="npm run dev -- --port 3000"
+                />
+                <input
+                  className="px-2 py-1 text-sm border rounded bg-background font-mono"
+                  value={svc.portVar || ""}
+                  onChange={(e) => updateService(idx, "portVar", e.target.value)}
+                  placeholder="PORT_NUMBER_XXX"
+                  title="Port variable name for host mode (optional). Service gets a free port via this env var."
                 />
                 <input
                   className="px-2 py-1 text-sm border rounded bg-background font-mono"

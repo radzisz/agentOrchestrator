@@ -427,7 +427,7 @@ export async function rebaseRepo(
 
     let pushOk = true;
     if (rebaseChanged) {
-      const pushResult = await step("push --force-with-lease", `push origin "HEAD:refs/heads/${agentBranch}" --force-with-lease`, 60_000);
+      const pushResult = await step("push --force", `push --force origin "${agentBranch}"`, 60_000);
       if (!pushResult.ok) pushOk = false;
     } else {
       steps.push({ cmd: "push skipped", ok: true, output: "already up to date", ms: 0 });
@@ -481,14 +481,14 @@ export async function mergeRepo(
   }
 }
 
-/** Push agent branch with --force-with-lease. */
+/** Push agent branch with --force. */
 export async function pushRepo(
   agent: store.AgentData,
   state: AgentState,
 ): Promise<void> {
   if (!agent.agentDir || !agent.branch) throw new Error("No agent directory or branch");
   const result = await cmd.git(
-    `push origin "HEAD:refs/heads/${agent.branch}" --force-with-lease`,
+    `push --force origin "${agent.branch}"`,
     { cwd: agent.agentDir, source: `push:${agent.issueId}`, timeout: 60_000 },
   );
   if (!result.ok) throw new Error(`push failed: ${result.stderr}`);

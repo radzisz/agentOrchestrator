@@ -317,7 +317,7 @@ export class AgentAggregate {
   private async _doRefresh(): Promise<void> {
     const wasPreviouslyRunning = this.state.agent === "running";
     await containerOps.checkContainer(this._agent, this.state);
-    await agentProcessOps.checkAgentProcess(this._agent, this.state);
+    await agentProcessOps.checkAgentProcess(this._agent, this.state, this.projectPath);
     await serviceOps.checkServices(this._agent, this.projectPath, this.state);
     await gitOps.checkGit(this._agent, this.state, this.projectPath);
 

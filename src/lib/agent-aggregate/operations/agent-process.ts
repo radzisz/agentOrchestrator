@@ -65,10 +65,12 @@ export function filterClaudeOutput(raw: string): string {
 
 /** Check if Claude process is running inside the container.
  *  Uses cmd.dockerExec (child_process) instead of dockerode streaming to avoid
- *  blocking the Node.js event loop on Windows named pipes. */
+ *  blocking the Node.js event loop on Windows named pipes.
+ *  Also re-attaches to live output if server was restarted while Claude was running. */
 export async function checkAgentProcess(
   agent: store.AgentData,
   state: AgentState,
+  projectPath?: string,
 ): Promise<void> {
   if (!agent.containerName || state.container !== "running") {
     state.agent = "stopped";
@@ -79,7 +81,94 @@ export async function checkAgentProcess(
     `ps aux | grep -E '${CLAUDE_PATTERN}' | grep -v grep | grep -v ' Z ' || true`,
     { source: "checkAgentProcess", timeout: 10_000, user: "root" },
   );
-  state.agent = r.ok && r.stdout.trim().length > 0 ? "running" : "stopped";
+  const isRunning = r.ok && r.stdout.trim().length > 0;
+  state.agent = isRunning ? "running" : "stopped";
+
+  // Re-attach: if Claude is running but we have no active exec (server restarted),
+  // tail the container output so live output + onExit work again.
+  if (isRunning && !activeExecIds.has(agent.issueId)) {
+    reattachOutput(agent, projectPath);
+  }
+}
+
+/** Tail container output for a running Claude process we didn't start (e.g. after server restart). */
+function reattachOutput(agent: store.AgentData, projectPath?: string): void {
+  if (!agent.containerName) return;
+  const issueId = agent.issueId;
+  const containerName = agent.containerName;
+
+  console.log(`[agent-process] Reattaching to live output for ${issueId}`);
+
+  const execId = `reattach-${Date.now()}`;
+  activeExecIds.set(issueId, execId);
+
+  // Tail the output file written by `tee` in startAgentProcess.
+  // If file doesn't exist (agent started before tee was added), we still poll for exit.
+  const { spawn: spawnChild } = require("child_process");
+  const child = spawnChild("docker", [
+    "exec", containerName, "sh", "-c",
+    "test -f /tmp/claude-output.log && tail -n 20 -f /tmp/claude-output.log || (echo '[no output file — agent started before output capture was enabled]' && sleep 86400)",
+  ], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  child.stdout?.on("data", (d: Buffer) => {
+    const s = d.toString();
+    if (!s.includes("[no output file")) {
+      appendLiveOutput(issueId, s);
+    }
+  });
+  child.stderr?.on("data", (d: Buffer) => {
+    appendLiveOutput(issueId, d.toString());
+  });
+
+  // Poll: when Claude stops, kill the tail and handle exit
+  const pollInterval = setInterval(async () => {
+    try {
+      if (activeExecIds.get(issueId) !== execId) {
+        // Another exec took over (e.g. new wake)
+        clearInterval(pollInterval);
+        child.kill();
+        return;
+      }
+      const check = await cmd.dockerExec(
+        containerName,
+        `ps aux | grep -E '${CLAUDE_PATTERN}' | grep -v grep | grep -v ' Z ' || true`,
+        { source: "reattach-poll", timeout: 5_000, user: "root" },
+      );
+      const stillRunning = check.ok && check.stdout.trim().length > 0;
+      if (!stillRunning) {
+        clearInterval(pollInterval);
+        child.kill();
+
+        if (activeExecIds.get(issueId) !== execId) return;
+        activeExecIds.delete(issueId);
+
+        console.log(`[agent-process] Reattached Claude exited for ${issueId}`);
+
+        // Grab the output for message
+        const output = getLiveOutput(issueId, 50);
+        const agentResponse = filterClaudeOutput(output);
+        if (agentResponse && projectPath) {
+          const tail = agentResponse.split("\n").slice(-50).join("\n");
+          store.appendMessage(projectPath, issueId, "agent", tail);
+        }
+
+        // Update state
+        const currentAgent = store.getAgent(projectPath || "", issueId);
+        if (currentAgent && currentAgent.state?.agent === "running") {
+          currentAgent.state.agent = "stopped";
+          if (projectPath) {
+            store.saveAgent(projectPath, issueId, currentAgent);
+            store.appendLog(projectPath, `agent-${issueId}-lifecycle`, "claude exited (reattached)");
+          }
+          eventBus.emit("agent:exited", { agentId: issueId, issueId });
+        }
+      }
+    } catch {
+      // ignore poll errors
+    }
+  }, 5_000);
 }
 
 /** Launch Claude inside the agent container via exec. */
@@ -102,7 +191,7 @@ export async function startAgentProcess(
   const escapedPrompt = prompt.replace(/'/g, "'\\''");
   const { execId } = await execInContainerAsync(agent.containerName, [
     "sh", "-c",
-    `gosu agent claude -p --dangerously-skip-permissions --model sonnet '${escapedPrompt}' 2>&1`,
+    `gosu agent claude -p --dangerously-skip-permissions --model sonnet '${escapedPrompt}' 2>&1 | tee /tmp/claude-output.log`,
   ], {
     user: "root",
     workingDir: "/workspace",

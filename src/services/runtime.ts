@@ -53,6 +53,7 @@ interface ServiceConfig {
   name: string;
   cmd: string;
   port: number;
+  portVar?: string;
 }
 
 interface RuntimeProjectConfig {
@@ -414,6 +415,26 @@ export async function startLocal(
   }
 }
 
+/** Find a free TCP port by letting the OS assign one. */
+async function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const net = require("net");
+    const srv = net.createServer();
+    srv.listen(0, () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+    srv.on("error", reject);
+  });
+}
+
+/** Replace %VAR% placeholders in a command string with values from a map. */
+function substituteVars(cmd: string, vars: Record<string, string>): string {
+  return cmd.replace(/%([A-Z_][A-Z0-9_]*)%/g, (match, name) => {
+    return vars[name] !== undefined ? vars[name] : match;
+  });
+}
+
 // ---------------------------------------------------------------------------
 // LOCAL HOST runtime — runs directly on the host machine
 // ---------------------------------------------------------------------------
@@ -455,6 +476,7 @@ export async function startLocalHost(
   }
 
   const agentDir = agent.agentDir;
+  const ports = agent.portSlot !== undefined ? store.getPortsForSlot(agent.portSlot) : null;
 
   const logName = `runtime-${safe}`;
   const hk = hostKey(project.path, branch);
@@ -486,15 +508,47 @@ export async function startLocalHost(
     // Build config
     const rtCfg = getProjectRuntimeConfig(project.path);
     const installCmd = rtCfg.installCmd || "npm install";
-    const buildCmd = rtCfg.buildCmd || "";
     const services = rtCfg.services.length > 0
       ? rtCfg.services.map((s, i) => ({ ...s, port: s.port || detectPort(s.cmd, i) }))
       : [{ name: "dev", cmd: detectDevScript(agentDir), port: 3000 }];
 
-    // Host mode: services listen on their native ports (no Docker port mapping)
-    const rewrittenServices = services.map((svc) => {
-      return { ...svc, allocatedPort: svc.port };
-    });
+    // Determine if any service uses portVar (new declarative port system)
+    const hasPortVars = services.some(s => s.portVar);
+
+    // Allocate ports: portVar services get free ports, others use slot-based ports
+    const portVarValues: Record<string, string> = {};
+    const rewrittenServices: Array<typeof services[0] & { allocatedPort: number }> = [];
+
+    if (hasPortVars) {
+      // New portVar system: find free ports for each service
+      for (const svc of services) {
+        const allocatedPort = svc.portVar ? await findFreePort() : (svc.port || 3000);
+        if (svc.portVar) {
+          portVarValues[svc.portVar] = String(allocatedPort);
+        }
+        // Substitute %VAR% placeholders in the command
+        const cmd = substituteVars(svc.cmd, portVarValues);
+        rewrittenServices.push({ ...svc, cmd, allocatedPort });
+      }
+    } else {
+      // Legacy slot-based port system
+      if (!ports) {
+        throw new Error(`Agent ${agent.issueId} has no port slot allocated`);
+      }
+      const allHostPorts = ports.all;
+      for (let idx = 0; idx < services.length; idx++) {
+        const svc = services[idx];
+        const allocatedPort = allHostPorts[idx] || allHostPorts[0];
+        let cmd = svc.cmd;
+        if (svc.port && svc.port !== allocatedPort) {
+          cmd = cmd.replace(new RegExp(`\\b${svc.port}\\b`, "g"), String(allocatedPort));
+        }
+        if (!cmd.includes("--port") && !cmd.includes("-p ")) {
+          cmd += ` --port ${allocatedPort}`;
+        }
+        rewrittenServices.push({ ...svc, cmd, allocatedPort });
+      }
+    }
 
     // Run install command
     store.appendLog(project.path, logName, `Running install: ${installCmd}`);
@@ -505,10 +559,6 @@ export async function startLocalHost(
       store.appendLog(project.path, logName, `Install failed: ${err.message}`);
       throw new Error(`Install failed: ${err.message}`);
     }
-
-    // Run build command if configured
-    // Skip buildCmd in host mode — dev servers don't need production builds
-    // (container mode runs buildCmd inside the Docker startup script)
 
     // Build env vars
     const envVars: Record<string, string> = {
@@ -533,6 +583,11 @@ export async function startLocalHost(
           envVars[line.substring(0, eqIdx)] = line.substring(eqIdx + 1);
         }
       }
+    }
+
+    // Add portVar values to env so services can read them
+    for (const [key, val] of Object.entries(portVarValues)) {
+      envVars[key] = val;
     }
 
     // Disable Sentry
@@ -599,14 +654,16 @@ export async function startLocalHost(
 
     hostProcesses.set(hk, children);
 
-    // Build service → host port map
+    // Build service → host port map (include portVar name for UI display)
     const servicePortMap = rewrittenServices.map((svc) => ({
       name: svc.name,
       hostPort: svc.allocatedPort,
       healthPath: (svc as any).healthPath || undefined,
+      portVar: svc.portVar || undefined,
     }));
 
     runtime.servicePortMap = servicePortMap;
+    runtime.portSlot = ports?.slot;
     // Persist PIDs so stop works even after server restart
     runtime.hostPids = children.map(c => c.pid).filter((p): p is number => p !== undefined);
     store.saveRuntime(project.path, branch, "LOCAL", runtime);
@@ -1151,6 +1208,7 @@ export async function stopRuntime(projectName: string, branch: string, type: sto
 
   runtime.status = "STOPPED";
   runtime.servicesEnabled = false;
+  runtime.servicePortMap = undefined;
   store.saveRuntime(project.path, branch, type, runtime);
 
   // Also clear servicesEnabled on the agent so auto-start doesn't re-trigger

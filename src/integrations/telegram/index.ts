@@ -109,6 +109,19 @@ async function send(issueId: string, message: string): Promise<void> {
   });
 }
 
+async function closeTopic(issueId: string): Promise<void> {
+  const chatId = await getChatId();
+  if (!chatId) return;
+  const topicId = await getTopicId(issueId);
+  if (!topicId) return;
+
+  log(`Closing topic for ${issueId} (topic ${topicId})`);
+  await tgApi("closeForumTopic", {
+    chat_id: chatId,
+    message_thread_id: topicId,
+  });
+}
+
 async function sendAndPin(issueId: string, message: string): Promise<void> {
   const chatId = await getChatId();
   if (!chatId) return;
@@ -171,10 +184,16 @@ export const telegramIntegration: Integration = {
 
   async onAgentSpawned(event) {
     log(`onAgentSpawned: ${event.issueId}`);
-    await ensureTopic(event.issueId, event.issueId);
+    // Get title from store
+    const store = await import("@/lib/store");
+    const project = store.getProjectByName(event.projectName);
+    const agent = project ? store.getAgent(project.path, event.issueId) : null;
+    const title = agent?.title || event.issueId;
+
+    await ensureTopic(event.issueId, `${event.issueId}: ${title}`);
     await sendAndPin(
       event.issueId,
-      `📌 <b>${event.issueId}</b>`
+      `📌 <b>${event.issueId}</b>: ${title}`
     );
     await send(
       event.issueId,
@@ -191,6 +210,7 @@ export const telegramIntegration: Integration = {
   async onAgentCompleted(event) {
     log(`onAgentCompleted: ${event.issueId}`);
     await send(event.issueId, "👁 Preview ready — awaiting review");
+    await closeTopic(event.issueId);
   },
 
   async onAgentPreview(event) {
@@ -204,6 +224,7 @@ export const telegramIntegration: Integration = {
   async onAgentMerged(event) {
     log(`onAgentMerged: ${event.issueId}`);
     await send(event.issueId, "✅ Merged to master");
+    await closeTopic(event.issueId);
   },
 
   async onAgentError(event) {
