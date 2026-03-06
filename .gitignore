@@ -1,0 +1,11 @@
+.env
+.env.10timesdev
+node_modules/
+.next/
+out/
+build/
+*.tsbuildinfo
+next-env.d.ts
+.cmd-logs/
+.claude/
+config.json
