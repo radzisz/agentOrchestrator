@@ -15,6 +15,7 @@ export function IntegrationsSection({
   projectName,
   linearTeamKey,
   linearLabel,
+  linearPreviewLabel,
   githubToken,
   runtimeConfig,
   remoteConfigData,
@@ -24,6 +25,7 @@ export function IntegrationsSection({
   projectName: string;
   linearTeamKey: string;
   linearLabel: string;
+  linearPreviewLabel: string;
   githubToken: string | null;
   runtimeConfig: RuntimeConfigData | null;
   remoteConfigData: RemoteConfigData;
@@ -83,6 +85,7 @@ export function IntegrationsSection({
                 <div className="text-xs text-muted-foreground space-y-0.5">
                   <div>Team Key: {linearTeamKey}</div>
                   <div>Label: {linearLabel}</div>
+                  {linearPreviewLabel && <div>Preview Label: {linearPreviewLabel}</div>}
                 </div>
               </CardContent>
             </Card>

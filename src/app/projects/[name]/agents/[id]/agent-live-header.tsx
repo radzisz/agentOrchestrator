@@ -26,6 +26,7 @@ interface AgentLiveHeaderProps {
   initialCurrentOp: CurrentOp | null;
   title: string;
   description?: string;
+  createdBy?: string;
   branch: string;
 }
 
@@ -57,6 +58,7 @@ export function AgentLiveHeader({
   initialCurrentOp,
   title,
   description,
+  createdBy,
   branch,
 }: AgentLiveHeaderProps) {
   const [state, setState] = useState<AgentStateData>(initialState);
@@ -136,7 +138,10 @@ export function AgentLiveHeader({
           {description && (
             <p className="text-sm text-muted-foreground mt-0.5 max-w-2xl line-clamp-2">{description}</p>
           )}
-          <p className="text-xs text-muted-foreground mt-1">Branch: {branch}</p>
+          <p className="text-xs text-muted-foreground mt-1">
+            Branch: {branch}
+            {createdBy && <span className="ml-3">Author: {createdBy}</span>}
+          </p>
         </div>
       </div>
 

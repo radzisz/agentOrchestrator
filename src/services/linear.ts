@@ -35,7 +35,8 @@ export interface LinearIssue {
   description: string | null;
   priority: number;
   state: { name: string };
-  labels: { nodes: Array<{ name: string }> };
+  labels: { nodes: Array<{ id: string; name: string }> };
+  creator: { id: string; name: string } | null;
   comments: {
     nodes: Array<{
       body: string;
@@ -43,6 +44,7 @@ export interface LinearIssue {
       user: { name: string; isMe: boolean };
     }>;
   };
+  assignee: { id: string; name: string } | null;
   team: { id: string; key: string };
 }
 
@@ -64,7 +66,9 @@ export async function getAgentIssues(
         nodes {
           id identifier title description priority
           state { name }
-          labels { nodes { name } }
+          labels { nodes { id name } }
+          creator { id name }
+          assignee { id name }
           comments(first: 20, orderBy: createdAt) {
             nodes {
               body createdAt
@@ -89,7 +93,9 @@ export async function getIssue(
       issue(id: $id) {
         id identifier title description priority
         state { name }
-        labels { nodes { name } }
+        labels { nodes { id name } }
+        creator { id name }
+        assignee { id name }
         comments(first: 20, orderBy: createdAt) {
           nodes {
             body createdAt
@@ -102,6 +108,59 @@ export async function getIssue(
   `, { id: issueUuid });
 
   return data.issue ?? null;
+}
+
+export async function getAssignedIssues(
+  apiKey: string,
+  teamId: string,
+  assigneeId: string
+): Promise<LinearIssue[]> {
+  const data = await linearQuery(apiKey, `
+    query($teamId: ID!, $assigneeId: ID!) {
+      issues(
+        filter: {
+          team: { id: { eq: $teamId } }
+          assignee: { id: { eq: $assigneeId } }
+        }
+        first: 50
+        orderBy: updatedAt
+      ) {
+        nodes {
+          id identifier title description priority
+          state { name }
+          labels { nodes { id name } }
+          creator { id name }
+          assignee { id name }
+          comments(first: 20, orderBy: createdAt) {
+            nodes {
+              body createdAt
+              user { name isMe }
+            }
+          }
+          team { id key }
+        }
+      }
+    }
+  `, { teamId, assigneeId });
+
+  return data.issues.nodes;
+}
+
+export async function getTeamMembers(
+  apiKey: string,
+  teamId: string
+): Promise<Array<{ id: string; name: string; email: string; displayName: string }>> {
+  const data = await linearQuery(apiKey, `
+    query($teamId: String!) {
+      team(id: $teamId) {
+        members {
+          nodes { id name email displayName }
+        }
+      }
+    }
+  `, { teamId });
+
+  return data.team.members.nodes;
 }
 
 export async function createIssue(
@@ -216,4 +275,20 @@ export async function resolveTeam(
     name: team.name,
     orgUrl: `https://linear.app/${team.organization.urlKey}/team/${team.key}`,
   };
+}
+
+export async function removeLabel(
+  apiKey: string,
+  issueUuid: string,
+  currentLabels: Array<{ id: string; name: string }>,
+  labelIdToRemove: string,
+): Promise<void> {
+  const remainingIds = currentLabels
+    .filter((l) => l.id !== labelIdToRemove)
+    .map((l) => l.id);
+  await linearQuery(apiKey, `
+    mutation($id: String!, $labelIds: [String!]!) {
+      issueUpdate(id: $id, input: { labelIds: $labelIds }) { success }
+    }
+  `, { id: issueUuid, labelIds: remainingIds });
 }

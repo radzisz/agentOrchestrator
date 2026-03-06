@@ -121,7 +121,7 @@ export function ServicesBar({
     <div className="space-y-1">
       {/* Main line */}
       <div className="flex items-center gap-2 text-xs">
-        <span className="text-muted-foreground">Preview</span>
+        <span className="text-muted-foreground">Local preview</span>
         <span className={`font-mono font-medium ${statusColor}`}>{statusText}</span>
 
         {/* Service links — show as soon as port map is available (including during starting) */}

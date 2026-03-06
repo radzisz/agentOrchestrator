@@ -47,6 +47,9 @@ export async function PATCH(
     supabaseAccessToken: "SUPABASE_ACCESS_TOKEN",
     supabaseProjectRef: "SUPABASE_PROJECT_REF",
     netlifyAuthToken: "NETLIFY_AUTH_TOKEN",
+    linearPreviewLabel: "LINEAR_PREVIEW_LABEL",
+    linearAssigneeId: "LINEAR_ASSIGNEE_ID",
+    linearAssigneeName: "LINEAR_ASSIGNEE_NAME",
   };
 
   for (const [bodyKey, envKey] of Object.entries(fieldMap)) {

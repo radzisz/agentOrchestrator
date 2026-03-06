@@ -20,6 +20,9 @@ interface ProjectData {
   linearApiKey: string | null;
   linearTeamKey: string | null;
   linearLabel: string;
+  linearPreviewLabel: string;
+  linearAssigneeId: string | null;
+  linearAssigneeName: string | null;
   githubToken: string | null;
   supabaseAccessToken: string | null;
   supabaseProjectRef: string | null;
@@ -184,8 +187,18 @@ function IntegrationsTab({ project }: { project: ProjectData }) {
   const [linearApiKey, setLinearApiKey] = useState(project.linearApiKey || "");
   const [linearTeamKey, setLinearTeamKey] = useState(project.linearTeamKey || "");
   const [linearLabel, setLinearLabel] = useState(project.linearLabel);
+  const [linearPreviewLabel, setLinearPreviewLabel] = useState(project.linearPreviewLabel || "");
   const [githubToken, setGithubToken] = useState(project.githubToken || "");
   const [saving, setSaving] = useState<string | null>(null);
+
+  // Detection mode: "label" or "assignee"
+  const [detectionMode, setDetectionMode] = useState<"label" | "assignee">(
+    project.linearAssigneeId ? "assignee" : "label"
+  );
+  const [assigneeId, setAssigneeId] = useState(project.linearAssigneeId || "");
+  const [assigneeName, setAssigneeName] = useState(project.linearAssigneeName || "");
+  const [members, setMembers] = useState<Array<{ id: string; name: string; email: string; displayName: string }>>([]);
+  const [loadingMembers, setLoadingMembers] = useState(false);
 
   async function saveField(field: string, value: string) {
     setSaving(field);
@@ -197,6 +210,67 @@ function IntegrationsTab({ project }: { project: ProjectData }) {
       });
       if (!resp.ok) throw new Error("Save failed");
       toast.success("Saved");
+    } catch {
+      toast.error("Failed to save");
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function fetchMembers() {
+    if (members.length > 0) return;
+    setLoadingMembers(true);
+    try {
+      const resp = await fetch(`/api/projects/${project.name}/linear/members`);
+      if (!resp.ok) throw new Error("Failed to fetch members");
+      const data = await resp.json();
+      setMembers(data);
+    } catch {
+      toast.error("Failed to load team members");
+    } finally {
+      setLoadingMembers(false);
+    }
+  }
+
+  async function saveDetectionMode(mode: "label" | "assignee") {
+    setDetectionMode(mode);
+    setSaving("detectionMode");
+    try {
+      if (mode === "label") {
+        // Clear assignee, keep label
+        const resp = await fetch(`/api/projects/${project.name}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ linearAssigneeId: null, linearAssigneeName: null }),
+        });
+        if (!resp.ok) throw new Error("Save failed");
+        setAssigneeId("");
+        setAssigneeName("");
+      }
+      // For assignee mode, user picks from dropdown which triggers saveAssignee
+      toast.success(mode === "label" ? "Using label detection" : "Select an assignee");
+    } catch {
+      toast.error("Failed to save");
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function saveAssignee(memberId: string, memberName: string) {
+    setAssigneeId(memberId);
+    setAssigneeName(memberName);
+    setSaving("assignee");
+    try {
+      const resp = await fetch(`/api/projects/${project.name}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          linearAssigneeId: memberId || null,
+          linearAssigneeName: memberName || null,
+        }),
+      });
+      if (!resp.ok) throw new Error("Save failed");
+      toast.success(`Assignee: ${memberName}`);
     } catch {
       toast.error("Failed to save");
     } finally {
@@ -232,28 +306,56 @@ function IntegrationsTab({ project }: { project: ProjectData }) {
               </Button>
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs text-muted-foreground block mb-1">Team Key</label>
-              <div className="flex gap-2">
-                <input
-                  className="flex-1 px-2 py-1 text-sm border rounded bg-background"
-                  value={linearTeamKey}
-                  onChange={(e) => setLinearTeamKey(e.target.value)}
-                  placeholder="UKR"
-                />
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={saving === "linearTeamKey"}
-                  onClick={() => saveField("linearTeamKey", linearTeamKey)}
-                >
-                  {saving === "linearTeamKey" ? "..." : "Save"}
-                </Button>
-              </div>
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Team Key</label>
+            <div className="flex gap-2">
+              <input
+                className="flex-1 px-2 py-1 text-sm border rounded bg-background"
+                value={linearTeamKey}
+                onChange={(e) => setLinearTeamKey(e.target.value)}
+                placeholder="UKR"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={saving === "linearTeamKey"}
+                onClick={() => saveField("linearTeamKey", linearTeamKey)}
+              >
+                {saving === "linearTeamKey" ? "..." : "Save"}
+              </Button>
             </div>
-            <div>
-              <label className="text-xs text-muted-foreground block mb-1">Label</label>
+          </div>
+
+          {/* Issue detection mode */}
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Issue Detection</label>
+            <div className="flex gap-1 mb-2">
+              <button
+                className={`px-3 py-1 text-xs rounded-l border ${
+                  detectionMode === "label"
+                    ? "bg-foreground text-background border-foreground"
+                    : "bg-background text-muted-foreground border-border hover:text-foreground"
+                }`}
+                onClick={() => saveDetectionMode("label")}
+              >
+                By Label
+              </button>
+              <button
+                className={`px-3 py-1 text-xs rounded-r border border-l-0 ${
+                  detectionMode === "assignee"
+                    ? "bg-foreground text-background border-foreground"
+                    : "bg-background text-muted-foreground border-border hover:text-foreground"
+                }`}
+                onClick={() => {
+                  saveDetectionMode("assignee");
+                  fetchMembers();
+                }}
+              >
+                By Assignee
+              </button>
+            </div>
+
+            {detectionMode === "label" && (
               <div className="flex gap-2">
                 <input
                   className="flex-1 px-2 py-1 text-sm border rounded bg-background"
@@ -270,6 +372,51 @@ function IntegrationsTab({ project }: { project: ProjectData }) {
                   {saving === "linearLabel" ? "..." : "Save"}
                 </Button>
               </div>
+            )}
+
+            {detectionMode === "assignee" && (
+              <div className="flex gap-2">
+                <select
+                  className="flex-1 px-2 py-1 text-sm border rounded bg-background"
+                  value={assigneeId}
+                  onChange={(e) => {
+                    const member = members.find((m) => m.id === e.target.value);
+                    if (member) {
+                      saveAssignee(member.id, member.displayName || member.name);
+                    }
+                  }}
+                  onFocus={() => fetchMembers()}
+                >
+                  <option value="">Select member...</option>
+                  {members.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.displayName || m.name} ({m.email})
+                    </option>
+                  ))}
+                </select>
+                {loadingMembers && <span className="text-xs text-muted-foreground self-center">Loading...</span>}
+                {saving === "assignee" && <span className="text-xs text-muted-foreground self-center">Saving...</span>}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Preview Label (auto-deploy remote preview)</label>
+            <div className="flex gap-2">
+              <input
+                className="flex-1 px-2 py-1 text-sm border rounded bg-background"
+                value={linearPreviewLabel}
+                onChange={(e) => setLinearPreviewLabel(e.target.value)}
+                placeholder="TestPreview"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={saving === "linearPreviewLabel"}
+                onClick={() => saveField("linearPreviewLabel", linearPreviewLabel)}
+              >
+                {saving === "linearPreviewLabel" ? "..." : "Save"}
+              </Button>
             </div>
           </div>
         </CardContent>

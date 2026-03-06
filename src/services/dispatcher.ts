@@ -109,7 +109,8 @@ async function processProject(project: store.ProjectWithConfig): Promise<void> {
   const cfg = project.config;
   const linearApiKey = cfg.LINEAR_API_KEY;
   const linearTeamKey = cfg.LINEAR_TEAM_KEY;
-  const linearLabel = cfg.LINEAR_LABEL || "agent";
+  const linearLabel = cfg.LINEAR_LABEL;
+  const linearAssigneeId = cfg.LINEAR_ASSIGNEE_ID;
 
   if (!linearApiKey || !linearTeamKey) return;
 
@@ -128,8 +129,15 @@ async function processProject(project: store.ProjectWithConfig): Promise<void> {
     store.saveProjectConfig(project.path, envCfg);
   }
 
-  const issues = await linear.getAgentIssues(linearApiKey, linearTeamId, linearLabel);
-  log(`Poll ${project.name}: ${issues.length} issues (team=${linearTeamKey}, label=${linearLabel})`);
+  let issues: linear.LinearIssue[];
+  if (linearAssigneeId) {
+    issues = await linear.getAssignedIssues(linearApiKey, linearTeamId, linearAssigneeId);
+    log(`Poll ${project.name}: ${issues.length} issues (assignee=${cfg.LINEAR_ASSIGNEE_NAME || linearAssigneeId})`);
+  } else {
+    const label = linearLabel || "agent";
+    issues = await linear.getAgentIssues(linearApiKey, linearTeamId, label);
+    log(`Poll ${project.name}: ${issues.length} issues (label=${label})`);
+  }
 
   // Log state distribution for debugging
   const stateCounts = new Map<string, number>();
@@ -235,6 +243,7 @@ async function processIssue(
     if (currentAgent) {
       await ensureClaudeRunning(currentAgent, project);
       await checkWakeTrigger(currentAgent, issue, project);
+      await checkPreviewLabel(currentAgent, issue, project, cfg);
 
       // Check for "🤖 Gotowe" → trigger preview
       const agentDone = issue.comments.nodes.find((c) =>
@@ -253,6 +262,11 @@ async function processIssue(
         currentAgent.status = "IN_REVIEW";
         store.saveAgent(project.path, issueId, currentAgent);
 
+        // Auto-restart remote preview if preview label is on the issue
+        if (hasPreviewLabel(issue, cfg) && currentAgent.branch) {
+          fireRemotePreview(currentAgent, issue, project, cfg, true);
+        }
+
         eventBus.emit("agent:preview", {
           agentId: issueId,
           issueId,
@@ -265,6 +279,8 @@ async function processIssue(
   // ---- IN REVIEW ----
   if (state === "In Review") {
     if (!agent) return;
+
+    await checkPreviewLabel(agent, issue, project, cfg);
 
     const humanOk = issue.comments.nodes.find(
       (c) => !c.user.isMe && /^OK/i.test(c.body)
@@ -296,6 +312,100 @@ async function processIssue(
 
   // ---- Unhandled state ----
   log(`SKIP ${issueId}: unhandled state "${state}"`);
+}
+
+/**
+ * Check if the preview label is present on the issue.
+ * If yes and no active runtime → start remote preview (handles "label just appeared").
+ * The label is NEVER removed — it's a persistent flag.
+ */
+async function checkPreviewLabel(
+  agent: store.AgentData,
+  issue: linear.LinearIssue,
+  project: store.ProjectWithConfig,
+  cfg: store.ProjectConfig,
+): Promise<void> {
+  if (!hasPreviewLabel(issue, cfg)) return;
+
+  const branch = agent.branch;
+  if (!branch) return;
+
+  const issueId = issue.identifier;
+
+  // If runtime is already active or starting, nothing to do
+  const existingRt = store.getRuntime(project.path, branch, "REMOTE");
+  if (existingRt && !["STOPPED", "FAILED"].includes(existingRt.status)) {
+    return;
+  }
+
+  log(`PREVIEW-LABEL ${issueId}: label detected, no active runtime — starting remote preview`);
+  fireRemotePreview(agent, issue, project, cfg, false);
+}
+
+/** Returns true if the issue has the configured preview label. */
+function hasPreviewLabel(issue: linear.LinearIssue, cfg: store.ProjectConfig): boolean {
+  const name = cfg.LINEAR_PREVIEW_LABEL;
+  if (!name || !cfg.LINEAR_API_KEY) return false;
+  return issue.labels.nodes.some((l) => l.name === name);
+}
+
+/**
+ * Fire-and-forget: start (or restart) remote preview.
+ * @param restart — if true, stop existing runtime first (agent finished new work).
+ */
+function fireRemotePreview(
+  agent: store.AgentData,
+  issue: linear.LinearIssue,
+  project: store.ProjectWithConfig,
+  cfg: store.ProjectConfig,
+  restart: boolean,
+): void {
+  const branch = agent.branch!;
+  const issueId = issue.identifier;
+  const projectName = project.name;
+  const projectPath = project.path;
+  const apiKey = cfg.LINEAR_API_KEY!;
+  const issueUuid = issue.id;
+
+  const existing = store.getRuntime(projectPath, branch, "REMOTE");
+  const needsCleanup = restart && existing && !["STOPPED", "FAILED"].includes(existing.status);
+  const chain = needsCleanup
+    ? runtime.cleanupRuntime(projectName, branch, "REMOTE").catch(() => {})
+    : Promise.resolve();
+
+  chain.then(() => runtime.startRemote(projectName, branch)).then(async () => {
+    const rt = store.getRuntime(projectPath, branch, "REMOTE");
+    if (!rt) return;
+
+    const urls: string[] = [];
+    if (rt.previewUrl) urls.push(`**app**: ${rt.previewUrl}`);
+    if (rt.supabaseUrl) urls.push(`**Supabase**: \`${rt.supabaseUrl}\``);
+
+    const expiresFormatted = rt.expiresAt
+      ? new Date(rt.expiresAt).toLocaleString("pl-PL", { timeZone: "Europe/Warsaw" })
+      : "24h";
+
+    const comment = [
+      `## 🌐 Remote Preview${restart ? " (restart)" : ""}`,
+      ``,
+      ...urls.map((u) => `- ${u}`),
+      ``,
+      `⏱ **Dostępne do**: ${expiresFormatted}`,
+    ].join("\n");
+
+    await linear.addComment(apiKey, issueUuid, comment);
+
+    eventBus.emit("agent:preview", {
+      agentId: issueId,
+      issueId,
+      previewUrl: rt.previewUrl,
+      supabaseUrl: rt.supabaseUrl,
+    });
+
+    log(`PREVIEW ${issueId}: ✓ remote preview ${restart ? "restarted" : "started"}`);
+  }).catch((err) => {
+    log(`PREVIEW ${issueId}: FAILED — ${err}`);
+  });
 }
 
 /**
@@ -337,9 +447,34 @@ async function ensureClaudeRunning(
 
     if (!claudeRunning) {
       agent.status = "EXITED";
+      if (agent.state) agent.state.agent = "stopped";
       agent.updatedAt = new Date().toISOString();
       store.saveAgent(project.path, agent.issueId, agent);
       log(`Claude not running in ${agent.containerName}, marked ${agent.issueId} as EXITED`);
+
+      // Grab output from container log if no agent response was captured
+      try {
+        const logR = await cmd.dockerExec(
+          agent.containerName,
+          'tail -60 /tmp/claude-output.log 2>/dev/null || true',
+          { source: "dispatcher", timeout: 10_000, user: "root" },
+        );
+        if (logR.ok && logR.stdout.trim()) {
+          const existing = store.getMessages(project.path, agent.issueId);
+          const hasAgentReply = existing.some((m) => m.role === "agent");
+          if (!hasAgentReply) {
+            const { filterClaudeOutput } = await import("@/lib/agent-aggregate/operations/agent-process");
+            const filtered = filterClaudeOutput(logR.stdout.trim());
+            if (filtered) {
+              const tail = filtered.split("\n").slice(-50).join("\n");
+              store.appendMessage(project.path, agent.issueId, "agent", tail);
+              log(`Recovered agent output for ${agent.issueId} from container log`);
+            }
+          }
+        }
+      } catch {
+        // best effort
+      }
     }
   }
 }
@@ -355,19 +490,24 @@ async function checkWakeTrigger(
   if (agent.status !== "EXITED") return;
 
   const humanComments = issue.comments.nodes.filter((c) => !c.user.isMe);
-  const botComments = issue.comments.nodes.filter((c) => c.user.isMe);
-
   const lastHuman = humanComments[humanComments.length - 1];
-  const lastBot = botComments[botComments.length - 1];
 
-  if (lastHuman && (!lastBot || lastHuman.createdAt > lastBot.createdAt)) {
-    log(`WAKE ${agent.issueId}: new human comment`);
-    const agg = tryGetAggregate(project.name, agent.issueId);
-    if (agg) {
-      await agg.wakeAgent(lastHuman.body);
-    } else {
-      await lifecycle.wake(project.name, agent.issueId, lastHuman.body);
-    }
+  if (!lastHuman) return;
+
+  // Skip if we already woke for this exact comment
+  if (agent.lastWakeCommentAt && lastHuman.createdAt <= agent.lastWakeCommentAt) return;
+
+  log(`WAKE ${agent.issueId}: new human comment`);
+
+  // Mark as processed BEFORE waking to prevent re-trigger if agent exits quickly
+  agent.lastWakeCommentAt = lastHuman.createdAt;
+  store.saveAgent(project.path, agent.issueId, agent);
+
+  const agg = tryGetAggregate(project.name, agent.issueId);
+  if (agg) {
+    await agg.wakeAgent(lastHuman.body);
+  } else {
+    await lifecycle.wake(project.name, agent.issueId, lastHuman.body);
   }
 }
 
@@ -376,16 +516,28 @@ async function cleanupOrphans(
   activeIssueIds: string[]
 ): Promise<void> {
   const agents = store.listAgents(project.path);
+  const TERMINAL = new Set(["DONE", "CANCELLED", "REMOVED", "CLEANUP"]);
 
   for (const agent of agents) {
-    if (!["DONE", "CANCELLED"].includes(agent.status) && !activeIssueIds.includes(agent.issueId)) {
-      log(`ORPHAN CLEANUP ${agent.issueId}`);
-      const agg = tryGetAggregate(project.name, agent.issueId);
-      if (agg) {
-        await agg.removeAgent().catch((err) => log(`ORPHAN CLEANUP ${agent.issueId} failed: ${err}`));
-      } else {
-        await lifecycle.cleanup(project.name, agent.issueId);
-      }
+    if (TERMINAL.has(agent.status)) continue;
+    if (activeIssueIds.includes(agent.issueId)) continue;
+
+    // NEVER clean up agents that are actively running or in an active lifecycle
+    if (agent.state?.agent === "running") {
+      log(`ORPHAN SKIP ${agent.issueId}: agent is actively running (not in Linear query — may exceed first:50)`);
+      continue;
+    }
+    if (agent.state?.lifecycle === "spawning") {
+      log(`ORPHAN SKIP ${agent.issueId}: agent is spawning`);
+      continue;
+    }
+
+    log(`ORPHAN CLEANUP ${agent.issueId}`);
+    const agg = tryGetAggregate(project.name, agent.issueId);
+    if (agg) {
+      await agg.removeAgent().catch((err) => log(`ORPHAN CLEANUP ${agent.issueId} failed: ${err}`));
+    } else {
+      await lifecycle.cleanup(project.name, agent.issueId);
     }
   }
 }

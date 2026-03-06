@@ -4,6 +4,7 @@ import { AgentActions } from "./agent-actions";
 import { AgentContent } from "./agent-content";
 import { AgentLiveHeader } from "./agent-live-header";
 import { ServicesBar } from "./services-bar";
+import { RemotePreviewBar } from "./remote-preview-bar";
 import { getAggregate } from "@/lib/agent-aggregate";
 
 export const dynamic = "force-dynamic";
@@ -39,6 +40,12 @@ export default async function AgentDetailPage({
   const safeBranch = freshAgent.branch?.replace(/[^a-zA-Z0-9_-]/g, "-") || "";
   const runtimeId = `LOCAL/${safeBranch}`;
 
+  const cfg = store.getProjectConfig(project.path);
+  const remoteRuntime = freshAgent.branch
+    ? store.getRuntime(project.path, freshAgent.branch, "REMOTE")
+    : null;
+  const runtimeModes = store.getProjectJsonField<{ local: boolean; remote: boolean }>(project.path, "RUNTIME_MODES") || { local: true, remote: false };
+
   const uiStatus = freshAgent.uiStatus || { status: "closed" as const };
   const agentState = freshAgent.state || null;
   const currentOp = freshAgent.currentOperation ?? null;
@@ -56,6 +63,7 @@ export default async function AgentDetailPage({
             initialCurrentOp={currentOp}
             title={freshAgent.title || ""}
             description={freshAgent.description}
+            createdBy={freshAgent.createdBy}
             branch={freshAgent.branch || ""}
           />
         ) : (
@@ -74,6 +82,26 @@ export default async function AgentDetailPage({
               runtimeId={runtimeId}
               cfgServices={cfgServices}
               initialEnabled={freshAgent.servicesEnabled ?? false}
+            />
+          </div>
+        )}
+
+        {/* Remote preview bar */}
+        {runtimeModes.remote && freshAgent.branch && (
+          <div className="mt-2 pt-2 border-t border-border">
+            <RemotePreviewBar
+              projectName={projectName}
+              branch={freshAgent.branch}
+              previewLabel={cfg.LINEAR_PREVIEW_LABEL || undefined}
+              initialRuntime={remoteRuntime ? {
+                id: `REMOTE/${freshAgent.branch.replace(/[^a-zA-Z0-9_-]/g, "-")}`,
+                status: remoteRuntime.status,
+                previewUrl: remoteRuntime.previewUrl || null,
+                supabaseUrl: remoteRuntime.supabaseUrl || null,
+                expiresAt: remoteRuntime.expiresAt || null,
+                createdAt: remoteRuntime.createdAt || null,
+                error: remoteRuntime.error || null,
+              } : null}
             />
           </div>
         )}

@@ -159,6 +159,9 @@ export async function GET(
             return agg ? agg.uiStatus : (agent.uiStatus ?? null);
           })(),
           agentTitle: agent.title,
+          agentCreatedBy: agent.createdBy || null,
+          agentCreatedAt: agent.createdAt || null,
+          agentUpdatedAt: agent.updatedAt || null,
           agentDir: dir,
           containerRunning,
           localRuntime: runtimeInfo,

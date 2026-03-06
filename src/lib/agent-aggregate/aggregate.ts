@@ -109,6 +109,7 @@ export class AgentAggregate {
       this._agent.title = issue.title;
       this._agent.description = issue.description || undefined;
       this._agent.linearIssueUuid = issue.id;
+      this._agent.createdBy = issue.creator?.name || undefined;
       this._agent.branch = `agent/${this.issueId}`;
       this._agent.agentDir = agentDir;
       this.state.lifecycle = "spawning";
@@ -153,16 +154,19 @@ export class AgentAggregate {
         this.writeTaskMd(agentDir, issue);
         this.writeClaudeMd(agentDir, ports);
 
-        // Log initial message
-        const initialMessage = opts.customPrompt || `${issue.identifier}: ${issue.title}\n\n${issue.description || ""}`;
-        store.appendMessage(this.projectPath, this.issueId, "human", initialMessage);
+        // Log initial message (skip if retrying — messages already exist)
+        const existingMessages = store.getMessages(this.projectPath, this.issueId);
+        if (existingMessages.length === 0) {
+          const initialMessage = opts.customPrompt || `${issue.identifier}: ${issue.title}\n\n${issue.description || ""}`;
+          store.appendMessage(this.projectPath, this.issueId, "human", initialMessage);
 
-        // Comment on Linear
-        await linear.addComment(
-          cfg.LINEAR_API_KEY,
-          issue.id,
-          `🤖 Agent started\n\nProject: ${this.projectName}\nSlot: ${ports.slot} (ports: ${ports.frontend[0]}, ${ports.backend[0]}...)\nBranch: agent/${this.issueId}`,
-        );
+          // Comment on Linear
+          await linear.addComment(
+            cfg.LINEAR_API_KEY,
+            issue.id,
+            `🤖 Agent started\n\nProject: ${this.projectName}\nSlot: ${ports.slot} (ports: ${ports.frontend[0]}, ${ports.backend[0]}...)\nBranch: agent/${this.issueId}`,
+          );
+        }
 
         // Create container
         setProgress("creating Docker container");
@@ -265,6 +269,12 @@ export class AgentAggregate {
   /** Remove agent: optionally close Linear → stop → stop services → remove container → remove repo. */
   async removeAgent(opts?: { closeIssue?: boolean }): Promise<void> {
     return this.withLock("remove", async (setProgress) => {
+      // Safety: if agent is actively running, stop it first
+      if (this.state.agent === "running") {
+        setProgress("stopping running agent");
+        await agentProcessOps.stopAgentProcess(this._agent, this.state).catch(() => {});
+      }
+
       // Close Linear FIRST (before destroying anything)
       if (opts?.closeIssue) {
         setProgress("closing Linear issue");

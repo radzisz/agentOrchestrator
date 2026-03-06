@@ -28,6 +28,7 @@ export interface AgentData {
   linearIssueUuid?: string;
   title: string;
   description?: string;
+  createdBy?: string;
   status: AgentStatus;
   containerName?: string;
   branch?: string;
@@ -40,6 +41,7 @@ export interface AgentData {
   rebaseResult?: { success: boolean; steps: { cmd: string; ok: boolean; output: string }[]; error?: string; conflict?: boolean; conflictFiles?: string[] };
   createdAt: string;
   updatedAt: string;
+  lastWakeCommentAt?: string;
   // Aggregate state
   state?: import("@/lib/agent-aggregate/types").AgentState;
   currentOperation?: import("@/lib/agent-aggregate/types").CurrentOperation | null;

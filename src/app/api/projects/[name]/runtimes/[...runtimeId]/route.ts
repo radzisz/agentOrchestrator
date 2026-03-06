@@ -53,12 +53,12 @@ export async function GET(
   const { name, runtimeId } = await params;
   const { idSegments, action } = parseSegments(runtimeId);
 
-  try {
-    const rt = findRuntime(name, idSegments);
-    if (!rt) {
-      return NextResponse.json({ error: "Runtime not found" }, { status: 404 });
-    }
+  const rt = findRuntime(name, idSegments);
+  if (!rt) {
+    return NextResponse.json({ error: "Runtime not found" }, { status: 404 });
+  }
 
+  try {
     // /logs sub-action
     if (action === "logs") {
       const tail = parseInt(req.nextUrl.searchParams.get("tail") || "100", 10);
@@ -70,14 +70,22 @@ export async function GET(
 
     // For REMOTE runtimes in DEPLOYING state, check fresh status
     if (rt.type === "REMOTE" && rt.status === "DEPLOYING") {
-      const remoteStatus = await runtime.checkRemoteStatus(name, rt.branch);
-      const updated = await runtime.getRuntimeInfo(name, rt.branch, rt.type);
-      return NextResponse.json({ ...updated, remoteStatus });
+      try {
+        const remoteStatus = await runtime.checkRemoteStatus(name, rt.branch);
+        const updated = await runtime.getRuntimeInfo(name, rt.branch, rt.type);
+        return NextResponse.json({ ...updated, remoteStatus });
+      } catch (err) {
+        // checkRemoteStatus failed (external API) — return current data without fresh check
+        console.error(`[runtimes] checkRemoteStatus error for ${rt.branch}:`, err);
+        return NextResponse.json(result);
+      }
     }
 
     return NextResponse.json(result);
-  } catch {
-    return NextResponse.json({ error: "Runtime not found" }, { status: 404 });
+  } catch (err) {
+    console.error(`[runtimes] GET error for ${rt.branch}:`, err);
+    // Runtime exists in store but getRuntimeInfo failed — return what we have
+    return NextResponse.json({ runtime: rt, containerStatus: null });
   }
 }
 

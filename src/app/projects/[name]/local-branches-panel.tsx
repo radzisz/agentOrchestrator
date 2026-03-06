@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { GitBranch, Bot, Plus, GitFork, Info, Loader2, Container, Search, RefreshCw } from "lucide-react";
+import { GitBranch, Bot, Plus, GitFork, Info, Loader2, Container, Search, RefreshCw, ArrowUpDown } from "lucide-react";
 import { ServiceLink } from "@/components/service-link";
 
 // ---------------------------------------------------------------------------
@@ -49,6 +49,9 @@ interface LocalBranchInfo {
   agentStatus: string | null;
   agentUiStatus: { status: string; reason?: string } | null;
   agentTitle: string | null;
+  agentCreatedBy: string | null;
+  agentCreatedAt: string | null;
+  agentUpdatedAt: string | null;
   containerRunning: boolean;
   localRuntime: RuntimeInfo | null;
   runtimeConfig: RuntimeConfigData | null;
@@ -126,6 +129,8 @@ export function LocalBranchesPanel({
   const [logsContent, setLogsContent] = useState("");
   const [search, setSearch] = useState("");
   const [hideMerged, setHideMerged] = useState(true);
+  const [sortBy, setSortBy] = useState<"code" | "created" | "updated">("updated");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [reconciling, setReconciling] = useState<string | null>(null);
 
   // Dialogs
@@ -287,18 +292,36 @@ export function LocalBranchesPanel({
   const allClosed = branches.length > 0 && branches.every((b) => isTerminal(b.agentUiStatus?.status));
   const effectiveHideMerged = hideMerged && !allClosed;
 
-  const filteredBranches = branches.filter((b) => {
-    if (effectiveHideMerged && b.agentUiStatus?.status === "closed") return false;
-    if (search) {
-      const q = search.toLowerCase();
-      const haystack = [b.name, b.issueId, b.agentTitle, b.agentUiStatus?.status, b.commit.message]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      if (!haystack.includes(q)) return false;
-    }
-    return true;
-  });
+  const filteredBranches = branches
+    .filter((b) => {
+      if (effectiveHideMerged && b.agentUiStatus?.status === "closed") return false;
+      if (search) {
+        const q = search.toLowerCase();
+        const haystack = [b.name, b.issueId, b.agentTitle, b.agentUiStatus?.status, b.commit.message]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      const dir = sortDir === "asc" ? 1 : -1;
+      if (sortBy === "code") {
+        const aCode = (a.issueId || a.name).toLowerCase();
+        const bCode = (b.issueId || b.name).toLowerCase();
+        return aCode.localeCompare(bCode, undefined, { numeric: true }) * dir;
+      }
+      if (sortBy === "created") {
+        const aDate = a.agentCreatedAt || "";
+        const bDate = b.agentCreatedAt || "";
+        return aDate.localeCompare(bDate) * dir;
+      }
+      // "updated"
+      const aDate = a.agentUpdatedAt || a.commit.date || "";
+      const bDate = b.agentUpdatedAt || b.commit.date || "";
+      return aDate.localeCompare(bDate) * dir;
+    });
 
   const closedCount = branches.filter((b) => b.agentUiStatus?.status === "closed").length;
 
@@ -339,6 +362,29 @@ export function LocalBranchesPanel({
               className="pl-8 h-8 text-sm"
             />
           </div>
+          {/* Sort controls */}
+          <div className="inline-flex rounded border border-border overflow-hidden h-7 text-xs">
+            {(["code", "created", "updated"] as const).map((s) => (
+              <button
+                key={s}
+                className={`px-2 flex items-center gap-1 transition-colors ${
+                  sortBy === s
+                    ? "bg-accent text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+                onClick={() => {
+                  if (sortBy === s) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+                  else { setSortBy(s); setSortDir(s === "code" ? "asc" : "desc"); }
+                }}
+              >
+                {s === "code" ? "Code" : s === "created" ? "Created" : "Modified"}
+                {sortBy === s && (
+                  <span className="text-[10px]">{sortDir === "asc" ? "↑" : "↓"}</span>
+                )}
+              </button>
+            ))}
+          </div>
+
           {closedCount > 0 && (
             <button
               onClick={() => setHideMerged(!hideMerged)}
@@ -474,6 +520,9 @@ export function LocalBranchesPanel({
                       className="text-xs text-muted-foreground truncate mt-0.5 block hover:underline"
                     >
                       {branch.agentTitle}
+                      {branch.agentCreatedBy && (
+                        <span className="text-[11px] ml-2 opacity-60">by {branch.agentCreatedBy}</span>
+                      )}
                     </a>
                   )}
 

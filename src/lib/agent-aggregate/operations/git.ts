@@ -52,12 +52,6 @@ export async function checkGit(
   const hasAgentRepo = hasAgentDir && existsSync(join(agent.agentDir!, ".git"));
 
   if (!hasAgentRepo) {
-    // No .git directory — reset git state to defaults (don't keep stale values)
-    state.git.dirty = false;
-    state.git.aheadBy = 0;
-    state.git.behindBy = 0;
-    state.git.lastCommit = null;
-    state.git.op = "idle";
     // If the agent dir itself doesn't exist, clear branch too
     if (!hasAgentDir) {
       state.git.branch = "";
@@ -65,11 +59,16 @@ export async function checkGit(
 
     // Try container fallback if available
     if (containerName) {
-      const ok = await checkGitInContainer(containerName, state, agentBranch);
-      if (ok) {
-        // Container had valid git data — keep it
-      }
+      // Reset before container check — container is the source of truth
+      state.git.dirty = false;
+      state.git.aheadBy = 0;
+      state.git.behindBy = 0;
+      state.git.lastCommit = null;
+      state.git.op = "idle";
+      await checkGitInContainer(containerName, state, agentBranch);
     }
+    // If no container either, preserve previously persisted git state
+    // (branch exists on remote with commits even though we can't check right now)
   }
 
   if (hasAgentRepo) {
