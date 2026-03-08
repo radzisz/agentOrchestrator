@@ -27,6 +27,7 @@ interface AgentLiveHeaderProps {
   title: string;
   description?: string;
   createdBy?: string;
+  issueCreatedAt?: string;
   branch: string;
 }
 
@@ -59,6 +60,7 @@ export function AgentLiveHeader({
   title,
   description,
   createdBy,
+  issueCreatedAt,
   branch,
 }: AgentLiveHeaderProps) {
   const [state, setState] = useState<AgentStateData>(initialState);
@@ -138,9 +140,18 @@ export function AgentLiveHeader({
           {description && (
             <p className="text-sm text-muted-foreground mt-0.5 max-w-2xl line-clamp-2">{description}</p>
           )}
-          <p className="text-xs text-muted-foreground mt-1">
+          {(createdBy || issueCreatedAt) && (
+            <p className="text-xs text-muted-foreground mt-1">
+              {createdBy && <span>Reporter: {createdBy}</span>}
+              {issueCreatedAt && (
+                <span className={createdBy ? "ml-3" : ""}>
+                  {new Date(issueCreatedAt).toLocaleDateString("pl-PL", { day: "numeric", month: "short", year: "numeric" })}
+                </span>
+              )}
+            </p>
+          )}
+          <p className="text-xs text-muted-foreground mt-0.5">
             Branch: {branch}
-            {createdBy && <span className="ml-3">Author: {createdBy}</span>}
           </p>
         </div>
       </div>

@@ -64,12 +64,23 @@ export default async function AgentDetailPage({
             title={freshAgent.title || ""}
             description={freshAgent.description}
             createdBy={freshAgent.createdBy}
+            issueCreatedAt={freshAgent.issueCreatedAt}
             branch={freshAgent.branch || ""}
           />
         ) : (
           <div className="flex-1 min-w-0">
             <h1 className="text-2xl font-bold">{freshAgent.issueId}</h1>
             <p className="text-muted-foreground mt-1">{freshAgent.title}</p>
+            {(freshAgent.createdBy || freshAgent.issueCreatedAt) && (
+              <p className="text-xs text-muted-foreground mt-1">
+                {freshAgent.createdBy && <span>Reporter: {freshAgent.createdBy}</span>}
+                {freshAgent.issueCreatedAt && (
+                  <span className={freshAgent.createdBy ? " ml-3" : ""}>
+                    {new Date(freshAgent.issueCreatedAt).toLocaleDateString("pl-PL", { day: "numeric", month: "short", year: "numeric" })}
+                  </span>
+                )}
+              </p>
+            )}
           </div>
         )}
 
