@@ -30,11 +30,14 @@ export function AgentContent({
   useEffect(() => {
     function handleShowLogs() { changeTab("logs"); }
     function handleShowCode() { changeTab("code"); }
+    function handleShowChat() { changeTab("chat"); }
     window.addEventListener("show-logs", handleShowLogs);
     window.addEventListener("show-code", handleShowCode);
+    window.addEventListener("show-chat", handleShowChat);
     return () => {
       window.removeEventListener("show-logs", handleShowLogs);
       window.removeEventListener("show-code", handleShowCode);
+      window.removeEventListener("show-chat", handleShowChat);
     };
   }, [changeTab]);
 

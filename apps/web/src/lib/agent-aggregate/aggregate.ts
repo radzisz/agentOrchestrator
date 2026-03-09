@@ -5,7 +5,7 @@
 import { existsSync } from "fs";
 import * as store from "@/lib/store";
 import * as cmd from "@/lib/cmd";
-import { simpleGit } from "@/lib/cmd";
+import * as gitSvc from "@/services/git";
 import { eventBus } from "@/lib/event-bus";
 import type { TrackerIssue } from "@/lib/issue-trackers/types";
 import type { AgentState, AggregateContext, CurrentOperation, ReadonlyAgentState } from "./types";
@@ -60,7 +60,7 @@ export class AgentAggregate {
 
   // --- Read (public) ---
 
-  /** Read-only snapshot of the current state. External code must NOT cast away Readonly. */
+  /** Read-only snapshot of the current state. Deep cloned — safe for external use. */
   get snapshot(): ReadonlyAgentState {
     const s = this._state;
     return {
@@ -70,14 +70,14 @@ export class AgentAggregate {
       transition: s.transition ? { ...s.transition } : null,
       trackerStatus: s.trackerStatus,
       linearStatus: s.linearStatus,
-      git: { ...s.git },
-      services: { ...s.services },
+      git: { ...s.git, lastCommit: s.git.lastCommit ? { ...s.git.lastCommit } : null },
+      services: JSON.parse(JSON.stringify(s.services)),
     };
   }
 
-  /** Read-only view of agent metadata. */
+  /** Read-only view of agent metadata (deep clone — safe for external use). */
   get agentData(): Readonly<store.AgentData> {
-    return this._agent;
+    return JSON.parse(JSON.stringify(this._agent));
   }
 
   get currentOperation(): CurrentOperation | null {
@@ -153,6 +153,31 @@ export class AgentAggregate {
       this._state.agent = "stopped";
       this.persist();
       eventBus.emit("agent:exited", { agentId: this.issueId, issueId: this.issueId });
+
+      // Auto-push: agent committed, orchestrator pushes
+      this._autoPush().catch((err) => {
+        this.opLog("push", `auto-push failed: ${err}`);
+      });
+    }
+  }
+
+  /** Push agent branch to remote if there are unpushed commits and a remote exists. */
+  private async _autoPush(): Promise<void> {
+    if (!this._agent.agentDir || !this._agent.branch) return;
+
+    // Refresh git state to get accurate ahead/behind
+    const git = await gitOps.checkGit(this._agent, this._state.git, this.projectPath);
+    this._state.git = git;
+    this.persist();
+
+    if (git.aheadBy > 0 && !git.dirty) {
+      try {
+        await gitOps.pushRepo(this._agent, this._state);
+        this.opLog("push", `auto-pushed ${git.aheadBy} commit(s)`);
+      } catch (err) {
+        // Push may fail if no remote — that's fine for local-only repos
+        this.opLog("push", `auto-push skipped: ${err}`);
+      }
     }
   }
 
@@ -198,6 +223,12 @@ export class AgentAggregate {
   /** Mark agent as notified (human approved). */
   markNotified(): void {
     this._agent.notified = true;
+    this.persist();
+  }
+
+  /** Mark agent as reassigned (creator re-assigned after completion). */
+  markReassigned(): void {
+    this._agent.reassigned = true;
     this.persist();
   }
 
@@ -412,9 +443,11 @@ export class AgentAggregate {
       const filtered = agentProcessOps.filterClaudeOutput(output);
       if (!filtered) return;
 
+      const prefix = filtered.slice(0, 80);
       const messages = store.getMessages(this.projectPath, this.issueId);
-      const lastAgent = [...messages].reverse().find(m => m.role === "agent");
-      if (lastAgent && filtered.startsWith(lastAgent.text.slice(0, 50))) return;
+      // Check all recent agent messages for duplicates (onExit may have already saved it)
+      const recentAgentMsgs = messages.filter(m => m.role === "agent").slice(-3);
+      if (recentAgentMsgs.some(m => m.text.startsWith(prefix) || filtered.startsWith(m.text.slice(0, 80)))) return;
 
       store.appendMessage(this.projectPath, this.issueId, "agent", filtered);
       this.opLog("lifecycle", "recovered agent output from live buffer");
@@ -426,18 +459,7 @@ export class AgentAggregate {
   // --- Internal ---
 
   private async getDefaultBranch(): Promise<string> {
-    try {
-      const git = simpleGit(this.projectPath);
-      const ref = await git.raw(["symbolic-ref", "refs/remotes/origin/HEAD"]);
-      return ref.trim().replace("refs/remotes/origin/", "");
-    } catch {
-      try {
-        await simpleGit(this.projectPath).raw(["rev-parse", "--verify", "origin/main"]);
-        return "main";
-      } catch {
-        return "master";
-      }
-    }
+    return gitSvc.getDefaultBranch(this.projectPath);
   }
 
   private persist(): void {
@@ -505,7 +527,7 @@ export class AgentAggregate {
 
   /** Reload agent data from store (in case disk was updated externally). */
   reload(): void {
-    const fresh = store.getAgent(this.projectPath, this.issueId);
+    const fresh = store.getAgentRef(this.projectPath, this.issueId);
     if (fresh) {
       this._agent = fresh;
     }

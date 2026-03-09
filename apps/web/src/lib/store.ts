@@ -2,6 +2,15 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlink
 import { join, dirname } from "path";
 
 // ---------------------------------------------------------------------------
+// Deep clone — used by getters to prevent external mutation of cached objects
+// ---------------------------------------------------------------------------
+
+function deepClone<T>(obj: T): T {
+  if (obj === null || obj === undefined || typeof obj !== "object") return obj;
+  return JSON.parse(JSON.stringify(obj));
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -42,6 +51,7 @@ export interface IMProviderInstance {
   type: "telegram";              // extensible: "slack" | "discord" etc.
   name: string;
   isDefault: boolean;
+  enabled: boolean;              // per-instance on/off toggle
   config: Record<string, string>; // botToken, chatId
 }
 
@@ -51,6 +61,23 @@ export interface RepoProviderInstance {
   name: string;
   isDefault: boolean;
   config: Record<string, string>; // authMode, token, committerName, committerEmail
+}
+
+export interface RuntimeEnvInstance {
+  id: string;
+  type: "supabase" | "netlify" | "vercel";
+  name: string;
+  enabled: boolean;
+  config: Record<string, string>; // accessToken / authToken, teamId, etc.
+}
+
+export interface AIRule {
+  id: string;
+  title: string;
+  content: string;
+  enabled: boolean;
+  order: number;
+  whenToUse: string;           // freetext: "When task involves React frontend", agent decides
 }
 
 export interface AppConfig {
@@ -63,6 +90,8 @@ export interface AppConfig {
   aiProviderInstances?: AIProviderInstance[];
   imProviderInstances?: IMProviderInstance[];
   repoProviderInstances?: RepoProviderInstance[];
+  rtenvInstances?: RuntimeEnvInstance[];
+  aiRules?: AIRule[];
   nextPortSlot: number;
 }
 
@@ -194,20 +223,38 @@ const DEFAULT_CONFIG: AppConfig = {
   nextPortSlot: 0,
 };
 
+let _appConfigMtime = 0;
+
 export function getConfig(): AppConfig {
-  if (_appConfig) return _appConfig;
   if (!existsSync(CONFIG_PATH)) {
     _appConfig = { ...DEFAULT_CONFIG };
     saveConfig(_appConfig);
     return _appConfig;
   }
+  const mtime = statSync(CONFIG_PATH).mtimeMs;
+  if (_appConfig && mtime === _appConfigMtime) return _appConfig;
   _appConfig = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+  _appConfigMtime = mtime;
   return _appConfig!;
 }
 
 export function saveConfig(config: AppConfig): void {
   _appConfig = config;
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+}
+
+// ---------------------------------------------------------------------------
+// AI Rules (global)
+// ---------------------------------------------------------------------------
+
+export function getAIRules(): AIRule[] {
+  return getConfig().aiRules || [];
+}
+
+export function saveAIRules(rules: AIRule[]): void {
+  const config = getConfig();
+  config.aiRules = rules;
+  saveConfig(config);
 }
 
 // ---------------------------------------------------------------------------
@@ -443,6 +490,20 @@ export function getAgent(projectPath: string, issueId: string): AgentData | null
   if (agent && !agent.issueCreatedAt && agent.createdAt) {
     agent.issueCreatedAt = agent.createdAt;
   }
+  return agent ? deepClone(agent) : null;
+}
+
+/**
+ * Get the raw cached agent reference (no cloning).
+ * For internal use by AgentAggregate only — external code must use getAgent().
+ */
+export function getAgentRef(projectPath: string, issueId: string): AgentData | null {
+  const map = ensureAgentsLoaded(projectPath);
+  const agent = map.get(issueId) || null;
+  if (agent && !existsSync(agentFilePath(projectPath, issueId))) {
+    map.delete(issueId);
+    return null;
+  }
   return agent;
 }
 
@@ -593,7 +654,8 @@ function runtimeKey(branch: string, type: RuntimeType): string {
 
 export function getRuntime(projectPath: string, branch: string, type: RuntimeType): RuntimeData | null {
   const runtimes = ensureRuntimesLoaded(projectPath);
-  return runtimes.find((r) => r.branch === branch && r.type === type) || null;
+  const found = runtimes.find((r) => r.branch === branch && r.type === type);
+  return found ? deepClone(found) : null;
 }
 
 export function saveRuntime(projectPath: string, branch: string, type: RuntimeType, data: RuntimeData): void {
@@ -615,7 +677,7 @@ export function saveRuntime(projectPath: string, branch: string, type: RuntimeTy
 }
 
 export function listRuntimes(projectPath: string): RuntimeData[] {
-  return ensureRuntimesLoaded(projectPath);
+  return deepClone(ensureRuntimesLoaded(projectPath));
 }
 
 export function deleteRuntime(projectPath: string, branch: string, type: RuntimeType): void {
@@ -782,7 +844,7 @@ export function getIntegrationConfig(name: string): { enabled: boolean; config: 
   const appConfig = getConfig();
   const integ = appConfig.integrations[name];
   if (!integ) return { enabled: false, config: {} };
-  return { enabled: integ.enabled, config: integ.config || {} };
+  return { enabled: integ.enabled, config: deepClone(integ.config || {}) };
 }
 
 export function saveIntegrationConfig(name: string, data: { enabled: boolean; config?: Record<string, string> }): void {
@@ -823,7 +885,8 @@ function generateId(): string {
 export function getTrackerInstances(type?: string): TrackerInstance[] {
   const config = getConfig();
   const all = config.trackerInstances || [];
-  return type ? all.filter((i) => i.type === type) : all;
+  const filtered = type ? all.filter((i) => i.type === type) : all;
+  return deepClone(filtered);
 }
 
 export function getTrackerInstance(id: string): TrackerInstance | undefined {
@@ -897,7 +960,7 @@ export function saveProjectTrackerConfig(projectPath: string, trackerConfig: Pro
 
 export function getAIProviderInstances(): AIProviderInstance[] {
   const config = getConfig();
-  return config.aiProviderInstances || [];
+  return deepClone(config.aiProviderInstances || []);
 }
 
 export function getAIProviderInstance(id: string): AIProviderInstance | undefined {
@@ -972,6 +1035,7 @@ export function getIMProviderInstances(): IMProviderInstance[] {
         type: "telegram",
         name: "Telegram Bot",
         isDefault: true,
+        enabled: true,
         config: {
           botToken: tg.config.botToken,
           chatId: tg.config.chatId || "",
@@ -984,7 +1048,12 @@ export function getIMProviderInstances(): IMProviderInstance[] {
     }
   }
 
-  return instances;
+  // Backwards compat: default enabled to true for old instances
+  for (const inst of instances) {
+    if (inst.enabled === undefined) (inst as any).enabled = true;
+  }
+
+  return deepClone(instances);
 }
 
 export function getIMProviderInstance(id: string): IMProviderInstance | undefined {
@@ -1074,7 +1143,7 @@ export function getRepoProviderInstances(): RepoProviderInstance[] {
     }
   }
 
-  return instances;
+  return deepClone(instances);
 }
 
 export function getRepoProviderInstance(id: string): RepoProviderInstance | undefined {
@@ -1129,6 +1198,77 @@ export function deleteRepoProviderInstance(id: string): void {
     if (next) next.isDefault = true;
   }
 
+  saveConfig(config);
+}
+
+// ---------------------------------------------------------------------------
+// Runtime Env Instances — stored in AppConfig.rtenvInstances
+// ---------------------------------------------------------------------------
+
+export function getRtenvInstances(): RuntimeEnvInstance[] {
+  const config = getConfig();
+  let instances = config.rtenvInstances || [];
+
+  // Lazy migration: pull tokens from existing project configs
+  if (instances.length === 0) {
+    const projects = config.projects || [];
+    for (const p of projects) {
+      const cfg = getProjectConfig(p.path);
+      if (cfg.SUPABASE_ACCESS_TOKEN && !instances.find((i) => i.type === "supabase")) {
+        instances.push({
+          id: generateId(), type: "supabase", name: "Supabase",
+          enabled: true, config: { accessToken: cfg.SUPABASE_ACCESS_TOKEN },
+        });
+      }
+      if (cfg.NETLIFY_AUTH_TOKEN && !instances.find((i) => i.type === "netlify")) {
+        instances.push({
+          id: generateId(), type: "netlify", name: "Netlify",
+          enabled: true, config: { authToken: cfg.NETLIFY_AUTH_TOKEN },
+        });
+      }
+    }
+    if (instances.length > 0) {
+      config.rtenvInstances = instances;
+      saveConfig(config);
+    }
+  }
+
+  // Backwards compat
+  for (const inst of instances) {
+    if ((inst as any).enabled === undefined) (inst as any).enabled = true;
+  }
+
+  return deepClone(instances);
+}
+
+export function getRtenvInstance(id: string): RuntimeEnvInstance | undefined {
+  return getRtenvInstances().find((i) => i.id === id);
+}
+
+export function getRtenvInstancesByType(type: string): RuntimeEnvInstance[] {
+  return getRtenvInstances().filter((i) => i.type === type);
+}
+
+export function saveRtenvInstance(instance: RuntimeEnvInstance): void {
+  const config = getConfig();
+  if (!config.rtenvInstances) config.rtenvInstances = [];
+
+  if (!instance.id) instance.id = generateId();
+
+  const idx = config.rtenvInstances.findIndex((i) => i.id === instance.id);
+  if (idx >= 0) {
+    config.rtenvInstances[idx] = instance;
+  } else {
+    config.rtenvInstances.push(instance);
+  }
+
+  saveConfig(config);
+}
+
+export function deleteRtenvInstance(id: string): void {
+  const config = getConfig();
+  if (!config.rtenvInstances) return;
+  config.rtenvInstances = config.rtenvInstances.filter((i) => i.id !== id);
   saveConfig(config);
 }
 

@@ -16,6 +16,12 @@ interface AgentLiveHeaderProps {
   createdBy?: string;
   issueCreatedAt?: string;
   branch: string;
+  gitMode: "branch" | "worktree" | null;
+}
+
+/** Strip markdown image syntax from text */
+function stripImages(text: string): string {
+  return text.replace(/!\[[^\]]*\]\([^)]+\)/g, "").trim();
 }
 
 const uiStatusColors: Record<string, string> = {
@@ -46,6 +52,7 @@ export function AgentLiveHeader({
   createdBy,
   issueCreatedAt,
   branch,
+  gitMode,
 }: AgentLiveHeaderProps) {
   const { state, uiStatus, currentOp, refreshNow } = useAgentState();
   const [refreshing, setRefreshing] = useState(false);
@@ -93,9 +100,9 @@ export function AgentLiveHeader({
               <RefreshCw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
             </button>
           </div>
-          <p className="text-muted-foreground mt-1">{title}</p>
-          {description && (
-            <p className="text-sm text-muted-foreground mt-0.5 max-w-2xl line-clamp-2">{description}</p>
+          <p className="text-muted-foreground mt-1 break-words">{stripImages(title)}</p>
+          {description && stripImages(description) && (
+            <p className="text-sm text-muted-foreground mt-0.5 max-w-2xl line-clamp-2 break-words">{stripImages(description)}</p>
           )}
           {(createdBy || issueCreatedAt) && (
             <p className="text-xs text-muted-foreground mt-1">
@@ -109,19 +116,27 @@ export function AgentLiveHeader({
           )}
           <p className="text-xs text-muted-foreground mt-0.5">
             Branch: {branch}
+            {gitMode && (
+              <span className="ml-2 px-1.5 py-0.5 rounded bg-muted text-[10px] font-medium uppercase">
+                {gitMode === "worktree" ? "worktree" : "clone"}
+              </span>
+            )}
           </p>
         </div>
       </div>
-
-      {/* Next steps */}
-      <div className="mt-2 pt-2 border-t border-border space-y-2">
-        <NextSteps
-          state={state}
-          currentOp={currentOp}
-          issueId={issueId}
-          projectName={projectName}
-        />
-      </div>
     </>
+  );
+}
+
+/** Standalone next-steps bar — rendered outside the header so it's always visible */
+export function AgentNextSteps({ issueId, projectName }: { issueId: string; projectName: string }) {
+  const { state, currentOp } = useAgentState();
+  return (
+    <NextSteps
+      state={state}
+      currentOp={currentOp}
+      issueId={issueId}
+      projectName={projectName}
+    />
   );
 }

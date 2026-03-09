@@ -15,7 +15,7 @@ export interface ConfigField {
         value: string;
     };
 }
-export type ProviderCategory = "tracker" | "im" | "scm" | "ai";
+export type ProviderCategory = "tracker" | "im" | "scm" | "ai" | "rtenv";
 export interface ProviderTypeSchema {
     type: string;
     category: ProviderCategory;

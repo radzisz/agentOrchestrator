@@ -2,9 +2,8 @@
 // Task file helpers — TASK.md, CLAUDE.md, .gitignore entries
 // ---------------------------------------------------------------------------
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync, copyFileSync } from "fs";
 import { join, extname } from "path";
-import type { PortInfo } from "@/lib/store";
 import type { TrackerIssue } from "@/lib/issue-trackers/types";
 import type { AggregateContext } from "../types";
 
@@ -93,6 +92,40 @@ export function rewriteImageUrls(text: string, projectName: string, issueId: str
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Local image copy — for CDM tasks with pasted screenshots
+// ---------------------------------------------------------------------------
+
+const LOCAL_IMAGE_RE = /!\[([^\]]*)\]\((\/api\/projects\/[^/]+\/tasks\/images\/(img-[^)]+))\)/g;
+
+/**
+ * Copy local CDM task images from tasks dir to agent images dir,
+ * rewriting markdown paths to .10timesdev/images/{filename}.
+ */
+export function copyLocalImages(text: string, srcDir: string, destDir: string): string {
+  if (!text) return text;
+
+  const matches = [...text.matchAll(LOCAL_IMAGE_RE)];
+  if (matches.length === 0) return text;
+
+  if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true });
+
+  let result = text;
+  for (const match of matches) {
+    const [full, alt, , filename] = match;
+    const srcPath = join(srcDir, filename);
+    if (!existsSync(srcPath)) continue;
+
+    const destPath = join(destDir, filename);
+    copyFileSync(srcPath, destPath);
+
+    const localPath = `.10timesdev/images/${filename}`;
+    result = result.replace(full, `![${alt}](${localPath})`);
+  }
+
+  return result;
+}
+
 export function ensureGitIgnored(agentDir: string, entries: string[]): void {
   const gitignorePath = join(agentDir, ".gitignore");
   let content = "";
@@ -107,19 +140,31 @@ export function ensureGitIgnored(agentDir: string, entries: string[]): void {
   }
 }
 
-export async function writeTaskMd(agentDir: string, issue: TrackerIssue, opts?: { linearApiKey?: string }): Promise<void> {
-  const labels = issue.labels.join(", ");
+export async function writeTaskMd(agentDir: string, issue: TrackerIssue, opts?: { linearApiKey?: string; projectPath?: string }): Promise<void> {
   const imagesDir = join(agentDir, ".10timesdev", "images");
   const authHeaders = opts?.linearApiKey ? { Authorization: opts.linearApiKey } : undefined;
 
-  // Download images from description and comments
-  const description = await downloadImages(issue.description || "Brak opisu", imagesDir, authHeaders);
+  // For local source issues with CDM task images, copy from tasks dir (title + description)
+  let titleText = issue.title;
+  let descText = issue.description || "";
+  if (issue.source === "local" && opts?.projectPath) {
+    const tasksImgDir = join(opts.projectPath, ".10timesdev", "tasks");
+    titleText = copyLocalImages(titleText, tasksImgDir, imagesDir);
+    descText = copyLocalImages(descText, tasksImgDir, imagesDir);
+  }
 
-  let content = `# ${issue.identifier}: ${issue.title}\n\n## Opis\n\n${description}\n\n## Priorytet\n${issue.priority}\n\n## Labelki\n${labels}\n\n## Status\n${issue.rawState}\n\n## Source\n${issue.source}\n`;
+  // Download remote images from title, description and comments
+  titleText = await downloadImages(titleText, imagesDir, authHeaders);
+  const description = await downloadImages(descText, imagesDir, authHeaders);
+
+  let content = `# ${issue.identifier}: ${titleText}\n\n`;
+  if (description) {
+    content += `${description}\n\n`;
+  }
 
   // Include human comments (with their inline images)
   if (issue.comments && issue.comments.length > 0) {
-    content += "\n## Komentarze\n";
+    content += "## Comments\n";
     for (const c of issue.comments) {
       const date = new Date(c.createdAt).toLocaleString();
       const body = await downloadImages(c.body, imagesDir, authHeaders);
@@ -127,72 +172,89 @@ export async function writeTaskMd(agentDir: string, issue: TrackerIssue, opts?: 
     }
   }
 
-  // Include Linear URL for reference
-  if (issue.url) {
-    content += `\n## Link\n\n${issue.url}\n`;
-  }
-
   const dir = join(agentDir, ".10timesdev");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "TASK.md"), content, "utf-8");
 }
 
-export function writeClaudeMd(ctx: AggregateContext, agentDir: string, ports: PortInfo, defaultBranch = "main"): void {
-  const content = `# Agent ${ctx.issueId} — ${ctx.projectName}
+export function writeClaudeMd(ctx: AggregateContext, agentDir: string, defaultBranch = "main", hasRules = false): void {
+  // Check for README
+  let readmeHint = "";
+  for (const name of ["README.md", "readme.md", "README", "README.txt"]) {
+    if (existsSync(join(agentDir, name))) {
+      readmeHint = `\nStart by reading \`${name}\` to understand the project structure, conventions, and development workflow.\n`;
+      break;
+    }
+  }
+
+  const rulesSection = hasRules ? `
+## AI Rules
+
+Read \`.10timesdev/RULES.md\`. It contains project-specific and global rules.
+For each rule, check the "When to use" description. Apply the rule ONLY if
+the condition matches your current task and the code you are modifying.
+Skip rules whose conditions do not apply.
+` : "";
+
+  const content = `# Agent Instructions
 
 ## Task
 
 Read \`.10timesdev/TASK.md\`. This is your task.
 Work ONLY on this task. Do not go beyond scope.
+${readmeHint}
+## Git — allowed operations
 
-## Identity
-
-- Issue: **${ctx.issueId}**
-- Project: **${ctx.projectName}**
-- Branch: \`agent/${ctx.issueId}\`
-- Tracker: **${ctx.agent.trackerSource || "linear"}** (\`${ctx.agent.trackerExternalId || ctx.agent.linearIssueUuid || "N/A"}\`)
-
-## Ports (ONLY these!)
-
-| Service    | Port  |
-|------------|-------|
-| Dev server | ${ports.frontend[0]} |
-| Service 2  | ${ports.frontend[1]} |
-| Service 3  | ${ports.frontend[2]} |
-| Backend 1  | ${ports.backend[0]} |
-| Backend 2  | ${ports.backend[1]} |
-| Backend 3  | ${ports.backend[2]} |
-
-## Commit format
-
-\`\`\`
-🟢 [${ctx.issueId}] opis zmian
-🟡 [${ctx.issueId}] opis zmian
-\`\`\`
-
-## Sync
+You may ONLY use these git commands:
 
 \`\`\`bash
-git fetch origin ${defaultBranch}
-git rebase origin/${defaultBranch}
-git push origin HEAD:agent/${ctx.issueId} --force-with-lease
+# Commit your changes (use descriptive message):
+git add <files>
+git commit -m "🟢 [${ctx.issueId}] description of change"
+
+# Rebase onto main (if instructed to do so):
+git rebase ${defaultBranch}
 \`\`\`
 
-## Before finishing
-
-Before pushing, verify the project builds without errors:
-
-\`\`\`bash
-npm run build 2>&1 | tail -30
-\`\`\`
-
-If there are TypeScript or build errors, fix them before pushing. Do NOT push code that doesn't compile.
-
+Do NOT push. Do NOT run git fetch. The orchestrator handles push and sync.
+${rulesSection}
 ## When done
 
-1. Push to origin/agent/${ctx.issueId}
-2. Comment on Linear
-3. Do nothing else
+If your work is complete and all changes are correct:
+
+1. **Commit** all your changes with a clear, descriptive message:
+   \`\`\`bash
+   git add <files>
+   git commit -m "🟢 [${ctx.issueId}] descriptive summary of what was done"
+   \`\`\`
+
+2. **Output** a JSON block as your **final message**:
+   \`\`\`json
+   {
+     "status": "done",
+     "description": "Brief summary of what was changed and why"
+   }
+   \`\`\`
+
+If you need more information from the user (do NOT commit):
+
+\`\`\`json
+{
+  "status": "more_information_required",
+  "description": "What information you need and why"
+}
+\`\`\`
+
+If you encountered an unrecoverable error (do NOT commit):
+
+\`\`\`json
+{
+  "status": "error",
+  "description": "What went wrong"
+}
+\`\`\`
+
+Do nothing else after outputting the JSON.
 `;
   const dir = join(agentDir, ".10timesdev");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });

@@ -1,4 +1,7 @@
+import { existsSync } from "fs";
+import { join } from "path";
 import * as cmd from "@/lib/cmd";
+import * as gitSvc from "@/services/git";
 import { eventBus } from "@/lib/event-bus";
 import * as store from "@/lib/store";
 
@@ -90,6 +93,11 @@ async function tick(): Promise<void> {
 }
 
 async function processProjectTrackers(project: store.ProjectWithConfig): Promise<void> {
+  if (!existsSync(join(project.path, ".git"))) {
+    log(`SKIP ${project.name}: no git repository at ${project.path}`);
+    return;
+  }
+
   const trackers = getActiveTrackers(project.path);
   const allActiveIssueIds: string[] = [];
 
@@ -139,6 +147,11 @@ async function processTrackerIssue(
         log(`SPAWN ${issueId}: SKIP — already spawning (op=${agent?.currentOperation?.name}, lifecycle=${agent?.state?.lifecycle})`);
         return;
       }
+      // Guard: don't retry if previous spawn failed (agent exists but stopped with error)
+      if (agent?.state?.agent === "stopped" && agent?.spawned === false) {
+        log(`SPAWN ${issueId}: SKIP — previous spawn failed (agent stopped, spawned=false)`);
+        return;
+      }
       log(`SPAWN ${issueId}: "${issue.title}" (phase=${issue.phase}, hasAgent=${!!agent}, spawned=${agent?.spawned})`);
       try {
         const now = new Date().toISOString();
@@ -159,9 +172,13 @@ async function processTrackerIssue(
         const agg = createAggregate(project.name, project.path, agentData);
         await agg.spawnAgent({ trackerIssue: issue.data });
 
-        const ports = agg.agentData.portSlot != null ? store.getPortsForSlot(agg.agentData.portSlot) : null;
-        const portInfo = ports ? `\nSlot: ${ports.slot} (ports: ${ports.frontend[0]}, ${ports.backend[0]}...)` : "";
-        await issue.addComment(`🤖 Agent started\n\nProject: ${project.name}${portInfo}\nBranch: agent/${issueId}`);
+        // Post "Agent started" comment only on external trackers (Linear etc.)
+        // Local tracker doesn't need it — it just pollutes comments and triggers false wake
+        if (issue.data.source !== "local") {
+          const ports = agg.agentData.portSlot != null ? store.getPortsForSlot(agg.agentData.portSlot) : null;
+          const portInfo = ports ? `\nSlot: ${ports.slot} (ports: ${ports.frontend[0]}, ${ports.backend[0]}...)` : "";
+          await issue.addComment(`🤖 Agent started\n\nProject: ${project.name}${portInfo}\nBranch: agent/${issueId}`);
+        }
 
         log(`SPAWN ${issueId}: ✓ success`);
       } catch (spawnErr) {
@@ -212,6 +229,11 @@ async function processTrackerIssue(
     }
 
     if (currentAgent) {
+      // Skip all processing if spawn never completed
+      if (!currentAgent.spawned && currentAgent.state?.agent === "stopped") {
+        log(`${issueId}: SKIP — spawn never completed (spawned=false, stopped)`);
+        return;
+      }
       await ensureClaudeRunning(currentAgent, project);
 
       // Reassign to creator when agent has stopped (assignee mode)
@@ -219,8 +241,7 @@ async function processTrackerIssue(
       if (reassignAgg && reassignAgg.snapshot.agent === "stopped" && reassignAgg.snapshot.lifecycle === "active" && !currentAgent.reassigned) {
         try {
           await issue.reassignOnDone();
-          currentAgent.reassigned = true;
-          store.saveAgent(project.path, issueId, currentAgent);
+          reassignAgg.markReassigned();
           log(`REASSIGN ${issueId}: reassigned to creator`);
         } catch (err) {
           log(`REASSIGN ${issueId}: failed — ${err}`);
@@ -243,21 +264,36 @@ async function processTrackerIssue(
         if (agentDone && !currentAgent.previewed) {
           log(`PREVIEW ${issueId}: agent completed`);
 
-          await issue.transitionTo("in_review");
+          // CDM / local-source agents: auto rebase + merge + cleanup
+          if (currentAgent.trackerSource === "local") {
+            log(`AUTO-MERGE ${issueId}: local source — auto rebase & merge`);
+            const autoAgg = tryGetAggregate(project.name, issueId) || getAggregate(project.name, issueId);
+            autoAgg.markPreviewed();
+            try {
+              await autoAgg.mergeAndClose({ cleanup: true, closeIssue: true });
+              log(`AUTO-MERGE ${issueId}: ✓ success`);
+            } catch (mergeErr) {
+              log(`AUTO-MERGE ${issueId}: ✗ FAILED — ${mergeErr}`);
+              // Fall back to normal in_review flow
+              await issue.transitionTo("in_review");
+            }
+          } else {
+            await issue.transitionTo("in_review");
 
-          const previewAgg = tryGetAggregate(project.name, issueId);
-          if (previewAgg) {
-            previewAgg.markPreviewed();
+            const previewAgg = tryGetAggregate(project.name, issueId);
+            if (previewAgg) {
+              previewAgg.markPreviewed();
+            }
+
+            if (issue.canManageLabels && hasPreviewLabel(issue) && currentAgent.branch) {
+              fireRemotePreview(currentAgent, issue, project, true);
+            }
+
+            eventBus.emit("agent:preview", {
+              agentId: issueId,
+              issueId,
+            });
           }
-
-          if (issue.canManageLabels && hasPreviewLabel(issue) && currentAgent.branch) {
-            fireRemotePreview(currentAgent, issue, project, true);
-          }
-
-          eventBus.emit("agent:preview", {
-            agentId: issueId,
-            issueId,
-          });
         }
       }
     }
@@ -280,8 +316,14 @@ async function processTrackerIssue(
 
       if (humanOk && !agent.notified) {
         log(`READY TO MERGE ${issueId}: ${issue.title}`);
-        agent.notified = true;
-        store.saveAgent(project.path, issueId, agent);
+        const notifyAgg = tryGetAggregate(project.name, issueId);
+        if (notifyAgg) {
+          notifyAgg.markNotified();
+        } else {
+          // Fallback: no aggregate, save directly via store
+          agent.notified = true;
+          store.saveAgent(project.path, issueId, agent);
+        }
         store.appendLog(project.path, `agent-${issueId}-lifecycle`, `ready_to_merge approved_by=${humanOk.authorName}`);
       }
     }
@@ -337,11 +379,8 @@ async function checkPreviewLabel(
   }
 
   // Verify branch exists on remote before triggering deploy
-  const lsRemote = await cmd.git(
-    `-C "${project.path}" ls-remote --heads origin "${branch}"`,
-    { source: "dispatcher", timeout: 10000 },
-  );
-  if (!lsRemote.ok || !lsRemote.stdout.trim()) {
+  const branchOnRemote = await gitSvc.branchExistsOnRemote(project.path, branch);
+  if (!branchOnRemote) {
     log(`PREVIEW-LABEL ${issueId}: branch ${branch} not on remote yet — skipping`);
     return;
   }

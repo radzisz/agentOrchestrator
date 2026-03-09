@@ -26,7 +26,7 @@ export function getAggregate(projectName: string, issueId: string): AgentAggrega
   const project = store.getProjectByName(projectName);
   if (!project) throw new Error(`Project not found: ${projectName}`);
 
-  const agent = store.getAgent(project.path, issueId);
+  const agent = store.getAgentRef(project.path, issueId);
   if (!agent) throw new Error(`Agent not found: ${issueId}`);
 
   const agg = new AgentAggregate(projectName, project.path, agent);
@@ -49,7 +49,7 @@ export function tryGetAggregate(projectName: string, issueId: string): AgentAggr
   const project = store.getProjectByName(projectName);
   if (!project) return null;
 
-  const agent = store.getAgent(project.path, issueId);
+  const agent = store.getAgentRef(project.path, issueId);
   if (!agent) return null;
 
   const agg = new AgentAggregate(projectName, project.path, agent);

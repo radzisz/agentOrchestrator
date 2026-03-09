@@ -43,3 +43,30 @@ export function findAgentInfo(id: string): { projectName: string; issueId: strin
   }
   return null;
 }
+
+/**
+ * Find agent by ID with full data (project + agent).
+ * Useful for routes that need agent metadata without creating an aggregate.
+ */
+export function findAgentWithProject(id: string): {
+  project: store.ProjectWithConfig;
+  agent: store.AgentData;
+  issueId: string;
+} | null {
+  if (id.includes("/")) {
+    const [projectName, issueId] = id.split("/", 2);
+    const project = store.getProjectByName(projectName);
+    if (!project) return null;
+    const projectWithConfig = store.listProjects().find((p) => p.name === projectName);
+    if (!projectWithConfig) return null;
+    const agent = store.getAgent(project.path, issueId);
+    if (!agent) return null;
+    return { project: projectWithConfig, agent, issueId };
+  }
+  const projects = store.listProjects();
+  for (const project of projects) {
+    const agent = store.getAgent(project.path, id);
+    if (agent) return { project, agent, issueId: id };
+  }
+  return null;
+}

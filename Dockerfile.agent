@@ -14,6 +14,9 @@ RUN useradd -m -s /bin/bash agent \
 RUN gosu agent bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
 ENV PATH="/home/agent/.local/bin:$PATH"
 
+# Gemini CLI (as agent user)
+RUN gosu agent bash -c 'npm install -g @google/gemini-cli'
+
 # Deno (installed as root, available to all users)
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh
 ENV DENO_INSTALL="/usr/local"

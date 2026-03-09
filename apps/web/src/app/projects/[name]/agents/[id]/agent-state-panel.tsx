@@ -343,8 +343,9 @@ function deriveNextSteps(
         await fetch(`/api/agents/${issueId}/wake`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: "Commit all your changes and push to remote. Do not start any new work." }),
+          body: JSON.stringify({ message: "Commit all your uncommitted changes now. Use a descriptive commit message. Do not start any new work. Output the JSON response as described in CLAUDE.md." }),
         });
+        window.dispatchEvent(new Event("show-chat"));
       },
     });
   }
@@ -424,10 +425,10 @@ function deriveNextSteps(
       text: "No changes. Send new instructions or cancel.",
     });
     steps.push({
-      key: "cancel",
+      key: "cancel-no-work",
       type: "action",
       icon: <Ban className="h-3.5 w-3.5" />,
-      text: "Cancel issue and clean up.",
+      text: "Cancel and clean up agent.",
       buttonLabel: "Cancel",
       buttonVariant: "destructive",
       onClick: () => { window.dispatchEvent(new Event("open-reject-dialog")); },
@@ -465,8 +466,6 @@ export function NextSteps({ state, currentOp, issueId, projectName }: {
     }
   }
 
-  const canReject = state.git.aheadBy > 0 && !state.git.dirty;
-
   return (
     <div className="space-y-1">
       {steps.map((step, i) => (
@@ -496,8 +495,8 @@ export function NextSteps({ state, currentOp, issueId, projectName }: {
               {step.buttonLabel}
             </Button>
           )}
-          {/* Reject link — right side of first row */}
-          {i === 0 && canReject && (
+          {/* Cancel link — always on the first row */}
+          {i === 0 && (
             <>
               <span className="flex-1" />
               <button
@@ -505,7 +504,7 @@ export function NextSteps({ state, currentOp, issueId, projectName }: {
                 disabled={loading !== null}
                 onClick={() => run(() => { window.dispatchEvent(new Event("open-reject-dialog")); }, "reject")}
               >
-                Reject & discard
+                Cancel
               </button>
             </>
           )}

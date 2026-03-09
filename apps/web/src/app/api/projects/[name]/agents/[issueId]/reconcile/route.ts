@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as store from "@/lib/store";
 import * as cmd from "@/lib/cmd";
+import * as gitSvc from "@/services/git";
 import { tryGetAggregate } from "@/lib/agent-aggregate";
+import { reconcileDeadRuntime } from "@/services/runtime-reconcile";
 
 const SRC = "reconcile";
 
@@ -36,14 +38,9 @@ export async function POST(
     // Also reconcile runtime
     const branchName = agent.branch || `agent/${issueId}`;
     const runtime = store.getRuntime(project.path, branchName, "LOCAL");
-    if (runtime) {
-      if ((runtime.status === "RUNNING" || runtime.status === "STARTING") && agg.snapshot.container !== "running") {
-        runtime.status = "STOPPED";
-        runtime.servicesEnabled = false;
-        runtime.updatedAt = new Date().toISOString();
-        store.saveRuntime(project.path, branchName, "LOCAL", runtime);
-        changes.push("Runtime was RUNNING but container dead → STOPPED");
-      }
+    if (runtime && agg.snapshot.container !== "running") {
+      const rtChanges = reconcileDeadRuntime(project.path, runtime);
+      changes.push(...rtChanges);
     }
 
     return NextResponse.json({
@@ -72,13 +69,9 @@ export async function POST(
     hasRepo = r.stdout === "yes";
   }
 
-  let remoteBranchExists = false;
   const branchName = agent.branch || `agent/${issueId}`;
-  const ref = await cmd.git(
-    `-C "${project.path}" ls-remote --heads origin "${branchName}"`,
-    { source: SRC, timeout: 10000 },
-  );
-  remoteBranchExists = ref.ok && ref.stdout.length > 0;
+  const remoteBranchResult = await gitSvc.branchExistsOnRemote(project.path, branchName);
+  const remoteBranchExists = remoteBranchResult === true;
 
   if (agent.status === "REMOVED" || agent.status === "DONE" || agent.status === "CLEANUP") {
     // Already terminal
@@ -97,14 +90,9 @@ export async function POST(
   }
 
   const runtime = store.getRuntime(project.path, branchName, "LOCAL");
-  if (runtime) {
-    if ((runtime.status === "RUNNING" || runtime.status === "STARTING") && !containerRunning) {
-      runtime.status = "STOPPED";
-      runtime.servicesEnabled = false;
-      runtime.updatedAt = new Date().toISOString();
-      store.saveRuntime(project.path, branchName, "LOCAL", runtime);
-      changes.push("Runtime was RUNNING but container dead → STOPPED");
-    }
+  if (runtime && !containerRunning) {
+    const rtChanges = reconcileDeadRuntime(project.path, runtime);
+    changes.push(...rtChanges);
   }
 
   if (agent.status !== oldStatus) {

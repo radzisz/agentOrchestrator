@@ -1,4 +1,5 @@
 import type { Integration, IntegrationContext } from "../types";
+import { resolveCredentials } from "@/lib/im-config";
 
 /**
  * Telegram integration — port of telegram.sh
@@ -8,40 +9,13 @@ import type { Integration, IntegrationContext } from "../types";
 const TG_API = "https://api.telegram.org/bot";
 
 let ctx: IntegrationContext | null = null;
+const _errorDebounce = new Map<string, { lastSent: number; count: number }>();
 
 function log(msg: string) {
   ctx?.log(msg);
 }
 
-async function getToken(): Promise<string | null> {
-  if (!ctx) return null;
-  // Resolve from IM provider instance first, fallback to legacy integration config
-  try {
-    const store = await import("@/lib/store");
-    const inst = store.getDefaultIMProviderInstance();
-    if (inst?.config.botToken) return inst.config.botToken;
-  } catch { /* fallback */ }
-  return ctx.getConfig("botToken");
-}
-
-async function getChatId(): Promise<string | null> {
-  if (!ctx) return null;
-  // Resolve from IM provider instance first, fallback to legacy integration config
-  try {
-    const store = await import("@/lib/store");
-    const inst = store.getDefaultIMProviderInstance();
-    if (inst?.config.chatId) return inst.config.chatId;
-  } catch { /* fallback */ }
-  return ctx.getConfig("chatId");
-}
-
-async function tgApi(method: string, body: Record<string, unknown>): Promise<any> {
-  const token = await getToken();
-  if (!token) {
-    log(`tgApi(${method}): no bot token configured`);
-    return null;
-  }
-
+async function tgApi(token: string, method: string, body: Record<string, unknown>): Promise<any> {
   try {
     const resp = await fetch(`${TG_API}${token}/${method}`, {
       method: "POST",
@@ -78,25 +52,22 @@ async function resolveTitle(issueId: string): Promise<string> {
   return issueId;
 }
 
-async function ensureTopic(issueId: string, title?: string): Promise<number | null> {
+async function ensureTopic(
+  creds: { token: string; chatId: string },
+  issueId: string,
+  title?: string,
+): Promise<number | null> {
   const existing = await getTopicId(issueId);
   if (existing) {
     log(`Topic for ${issueId}: ${existing} (cached)`);
     return existing;
   }
 
-  const chatId = await getChatId();
-  if (!chatId) {
-    log(`ensureTopic(${issueId}): no chatId configured`);
-    return null;
-  }
-
-  // Resolve a meaningful title if not provided
   const resolvedTitle = title || `${issueId}: ${await resolveTitle(issueId)}`;
 
   log(`Creating forum topic for ${issueId}...`);
-  const resp = await tgApi("createForumTopic", {
-    chat_id: chatId,
+  const resp = await tgApi(creds.token, "createForumTopic", {
+    chat_id: creds.chatId,
     name: resolvedTitle.substring(0, 128),
   });
 
@@ -105,17 +76,16 @@ async function ensureTopic(issueId: string, title?: string): Promise<number | nu
     await ctx.setConfig(`topic:${issueId}`, topicId.toString());
     log(`Created topic for ${issueId}: ${topicId}`);
 
-    // Always pin an intro message as the very first message in the topic
-    const pinResp = await tgApi("sendMessage", {
-      chat_id: chatId,
+    const pinResp = await tgApi(creds.token, "sendMessage", {
+      chat_id: creds.chatId,
       message_thread_id: topicId,
       text: `📌 <b>${issueId}</b>: ${title || await resolveTitle(issueId)}`,
       parse_mode: "HTML",
     });
     const msgId = pinResp?.result?.message_id;
     if (msgId) {
-      await tgApi("pinChatMessage", {
-        chat_id: chatId,
+      await tgApi(creds.token, "pinChatMessage", {
+        chat_id: creds.chatId,
         message_id: msgId,
         disable_notification: true,
       });
@@ -128,15 +98,15 @@ async function ensureTopic(issueId: string, title?: string): Promise<number | nu
 }
 
 async function send(issueId: string, message: string): Promise<void> {
-  const chatId = await getChatId();
-  if (!chatId) {
-    log(`send(${issueId}): no chatId`);
+  const creds = resolveCredentials(issueId);
+  if (!creds) {
+    log(`send(${issueId}): IM disabled or not configured`);
     return;
   }
 
   let topicId = await getTopicId(issueId);
   if (!topicId) {
-    topicId = await ensureTopic(issueId);
+    topicId = await ensureTopic(creds, issueId);
   }
   if (!topicId) {
     log(`send(${issueId}): no topic, message dropped`);
@@ -144,8 +114,8 @@ async function send(issueId: string, message: string): Promise<void> {
   }
 
   log(`Sending to ${issueId} (topic ${topicId}): ${message.substring(0, 60)}...`);
-  await tgApi("sendMessage", {
-    chat_id: chatId,
+  await tgApi(creds.token, "sendMessage", {
+    chat_id: creds.chatId,
     message_thread_id: topicId,
     text: message,
     parse_mode: "HTML",
@@ -153,43 +123,16 @@ async function send(issueId: string, message: string): Promise<void> {
 }
 
 async function closeTopic(issueId: string): Promise<void> {
-  const chatId = await getChatId();
-  if (!chatId) return;
+  const creds = resolveCredentials(issueId);
+  if (!creds) return;
   const topicId = await getTopicId(issueId);
   if (!topicId) return;
 
   log(`Closing topic for ${issueId} (topic ${topicId})`);
-  await tgApi("closeForumTopic", {
-    chat_id: chatId,
+  await tgApi(creds.token, "closeForumTopic", {
+    chat_id: creds.chatId,
     message_thread_id: topicId,
   });
-}
-
-async function sendAndPin(issueId: string, message: string): Promise<void> {
-  const chatId = await getChatId();
-  if (!chatId) return;
-
-  let topicId = await getTopicId(issueId);
-  if (!topicId) {
-    log(`sendAndPin(${issueId}): no topic`);
-    return;
-  }
-
-  const resp = await tgApi("sendMessage", {
-    chat_id: chatId,
-    message_thread_id: topicId,
-    text: message,
-    parse_mode: "HTML",
-  });
-
-  const msgId = resp?.result?.message_id;
-  if (msgId) {
-    await tgApi("pinChatMessage", {
-      chat_id: chatId,
-      message_id: msgId,
-      disable_notification: true,
-    });
-  }
 }
 
 export const telegramIntegration: Integration = {
@@ -227,13 +170,17 @@ export const telegramIntegration: Integration = {
 
   async onAgentSpawned(event) {
     log(`onAgentSpawned: ${event.issueId}`);
+    const creds = resolveCredentials(event.issueId, event.projectName);
+    if (!creds) {
+      log(`onAgentSpawned: IM disabled or not configured`);
+      return;
+    }
     const store = await import("@/lib/store");
     const project = store.getProjectByName(event.projectName);
     const agent = project ? store.getAgent(project.path, event.issueId) : null;
     const title = agent?.title || event.issueId;
 
-    // ensureTopic already sends & pins the intro message
-    await ensureTopic(event.issueId, `${event.issueId}: ${title}`);
+    await ensureTopic(creds, event.issueId, `${event.issueId}: ${title}`);
     await send(
       event.issueId,
       `🚀 Agent spawnowany\nBranch: ${event.branch}\nKontener: ${event.containerName}`
@@ -273,6 +220,21 @@ export const telegramIntegration: Integration = {
   },
 
   async onAgentError(event) {
+    // Logarithmic debounce: 1st instant, then 1min, 2min, 4min, 8min, ...
+    const key = `${event.issueId}:${event.error.substring(0, 100)}`;
+    const now = Date.now();
+    const prev = _errorDebounce.get(key);
+    if (prev) {
+      const cooldown = Math.min(60_000 * Math.pow(2, prev.count - 1), 3_600_000); // cap at 1h
+      if (now - prev.lastSent < cooldown) {
+        log(`onAgentError: ${event.issueId} — SKIP (debounce, next in ${Math.round((cooldown - (now - prev.lastSent)) / 1000)}s)`);
+        return;
+      }
+      prev.lastSent = now;
+      prev.count++;
+    } else {
+      _errorDebounce.set(key, { lastSent: now, count: 1 });
+    }
     log(`onAgentError: ${event.issueId} — ${event.error.substring(0, 80)}`);
     await send(event.issueId, `❌ Error: ${event.error.substring(0, 200)}`);
   },

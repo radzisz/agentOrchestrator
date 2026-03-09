@@ -394,7 +394,7 @@ export function BranchesPanel({ projectName, runtimeType }: { projectName: strin
     return (
       <div>
         {header}
-        <p className="text-sm text-muted-foreground">Loading branches from GitHub...</p>
+        <p className="text-sm text-muted-foreground">Loading remote branches...</p>
       </div>
     );
   }

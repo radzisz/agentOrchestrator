@@ -9,3 +9,4 @@ next-env.d.ts
 .cmd-logs/
 .claude/
 config.json
+.10timesdev/

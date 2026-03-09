@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as store from "@/lib/store";
 import * as cmd from "@/lib/cmd";
+import * as gitSvc from "@/services/git";
 
 export const dynamic = "force-dynamic";
 
@@ -25,24 +26,16 @@ async function git(agentDir: string, args: string, timeout = 15000): Promise<str
   return r.ok ? r.stdout : "";
 }
 
-async function getDefaultBranch(agentDir: string): Promise<string> {
-  const ref = await git(agentDir, "symbolic-ref refs/remotes/origin/HEAD");
-  if (ref) return ref.replace("refs/remotes/origin/", "");
-  const branches = await git(agentDir, "branch -r");
-  if (branches.includes("origin/main")) return "main";
-  return "master";
-}
+async function resolveRefs(agentDir: string, agentBranch?: string): Promise<{ base: string; head: string; useOrigin: boolean }> {
+  const { ref: base, hasOrigin: useOrigin } = await gitSvc.getBaseRef(agentDir);
 
-async function resolveRefs(agentDir: string, agentBranch?: string): Promise<{ base: string; head: string }> {
-  const defaultBranch = await getDefaultBranch(agentDir);
-  // Prefer origin/{agentBranch} over HEAD — HEAD may point to the wrong branch
-  // if the agent dir hasn't checked out the agent branch
   let head = "HEAD";
-  if (agentBranch) {
+  if (useOrigin && agentBranch) {
     const refExists = await git(agentDir, `rev-parse --verify "origin/${agentBranch}" 2>/dev/null`);
     if (refExists) head = `origin/${agentBranch}`;
   }
-  return { base: `origin/${defaultBranch}`, head };
+
+  return { base, head, useOrigin };
 }
 
 async function getFilesForCommits(
@@ -136,14 +129,16 @@ export async function GET(
     return NextResponse.json({ error: "Agent has no directory" }, { status: 404 });
   }
 
-  // Widen refspec if still narrow from shallow clone, then fetch
-  const refspec = await git(agentDir, "config --get-all remote.origin.fetch");
-  if (refspec && !refspec.includes("refs/heads/*")) {
-    await git(agentDir, 'config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"');
-  }
-  await git(agentDir, "fetch origin 2>&1", 30000);
+  const { base, head, useOrigin } = await resolveRefs(agentDir, agent.branch);
 
-  const { base, head } = await resolveRefs(agentDir, agent.branch);
+  // Widen refspec if still narrow from shallow clone, then fetch
+  if (useOrigin) {
+    const refspec = await git(agentDir, "config --get-all remote.origin.fetch");
+    if (refspec && !refspec.includes("refs/heads/*")) {
+      await git(agentDir, 'config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"');
+    }
+    await git(agentDir, "fetch origin 2>&1", 30000);
+  }
 
   // Parse optional commits filter
   const commitsParam = req.nextUrl.searchParams.get("commits");
@@ -164,7 +159,7 @@ export async function GET(
   }
 
   try {
-    const defaultBranch = await getDefaultBranch(agentDir);
+    const defaultBranch = await gitSvc.getDefaultBranch(agentDir);
     const currentBranch = agent.branch || await git(agentDir, "branch --show-current") || "";
 
     const [commitsRaw, numstatRaw, nameStatusRaw, diffStat] = await Promise.all([

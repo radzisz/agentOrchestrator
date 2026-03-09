@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as store from "@/lib/store";
+import { setProjectIMSettings } from "@/lib/im-config";
 
 export async function GET(
   _req: NextRequest,
@@ -45,6 +46,8 @@ export async function PATCH(
     netlifyAuthToken: "NETLIFY_AUTH_TOKEN",
     aiProviderInstanceId: "AI_PROVIDER_INSTANCE_ID",
     imProviderInstanceId: "IM_PROVIDER_INSTANCE_ID",
+    imEnabled: "IM_ENABLED",
+    gitWorkMode: "GIT_WORK_MODE",
   };
 
   for (const [bodyKey, envKey] of Object.entries(fieldMap)) {
@@ -63,6 +66,8 @@ export async function PATCH(
     netlifySites: "NETLIFY_SITES",
     runtimeConfig: "RUNTIME_CONFIG",
     runtimeModes: "RUNTIME_MODES",
+    rtenvConfig: "RTENV_CONFIG",
+    aiRules: "AI_RULES",
   };
 
   for (const [bodyKey, envKey] of Object.entries(jsonFieldMap)) {
@@ -83,5 +88,27 @@ export async function PATCH(
 
   store.saveProjectConfig(project.path, cfg);
 
+  // Sync IM settings to in-memory aggregate
+  if ("imEnabled" in body || "imProviderInstanceId" in body) {
+    setProjectIMSettings(name, {
+      ...(body.imEnabled !== undefined ? { enabled: String(body.imEnabled) !== "false" } : {}),
+      ...(body.imProviderInstanceId !== undefined ? { instanceId: body.imProviderInstanceId || null } : {}),
+    });
+  }
+
   return NextResponse.json({ name: project.name, path: project.path, config: cfg });
+}
+
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ name: string }> }
+) {
+  const { name } = await params;
+  const project = store.getProjectByName(name);
+  if (!project) {
+    return NextResponse.json({ error: "Project not found" }, { status: 404 });
+  }
+
+  store.removeProject(name);
+  return NextResponse.json({ ok: true });
 }

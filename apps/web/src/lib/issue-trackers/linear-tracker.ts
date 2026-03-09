@@ -38,6 +38,7 @@ export const linearTracker: IssueTracker = {
   canComment: _linear.canComment,
   canDetectWake: _linear.canDetectWake,
   canManageLabels: _linear.canManageLabels,
+  canCreateIssue: true,
 
   async pollIssues(projectPath: string): Promise<TrackerIssue[]> {
     const config = resolveConfig(projectPath);
@@ -90,5 +91,11 @@ export const linearTracker: IssueTracker = {
     const config = resolveConfig(projectPath);
     if (!config) return null;
     return _linear.getIssue!(config, externalId);
+  },
+
+  async createIssue(title: string, description: string, labels: string[], projectPath: string): Promise<{ externalId: string; identifier: string }> {
+    const config = resolveConfig(projectPath);
+    if (!config) throw new Error("Linear not configured for this project (API Key + Team Key required)");
+    return _linear.createIssue!(config, title, description, labels);
   },
 };

@@ -1,9 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Plus } from "lucide-react";
+
+interface TrackerOption {
+  name: string;
+  displayName: string;
+}
 
 export function SpawnButton({ projectName }: { projectName: string }) {
   const [open, setOpen] = useState(false);
@@ -12,6 +17,21 @@ export function SpawnButton({ projectName }: { projectName: string }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{ issueId: string; message: string } | null>(null);
+
+  const [trackers, setTrackers] = useState<TrackerOption[]>([]);
+  const [selectedTracker, setSelectedTracker] = useState("local");
+
+  useEffect(() => {
+    if (open && trackers.length === 0) {
+      fetch(`/api/projects/${projectName}/request-change`)
+        .then((r) => r.json())
+        .then((data: TrackerOption[]) => {
+          setTrackers(data);
+          if (data.length > 0) setSelectedTracker(data[0].name);
+        })
+        .catch(() => {});
+    }
+  }, [open]);
 
   function handleClose() {
     setOpen(false);
@@ -31,7 +51,11 @@ export function SpawnButton({ projectName }: { projectName: string }) {
       const resp = await fetch(`/api/projects/${projectName}/request-change`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: title.trim(), description: description.trim() }),
+        body: JSON.stringify({
+          title: title.trim(),
+          description: description.trim(),
+          tracker: selectedTracker,
+        }),
       });
       const data = await resp.json();
       if (!resp.ok) {
@@ -50,16 +74,15 @@ export function SpawnButton({ projectName }: { projectName: string }) {
     <>
       <Button onClick={() => setOpen(true)}>
         <Plus className="h-4 w-4 mr-1.5" />
-        New Feature
+        New Issue
       </Button>
 
       {open && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-card border rounded-xl p-6 w-full max-w-lg space-y-4">
-            <h2 className="text-lg font-semibold">New Feature</h2>
+            <h2 className="text-lg font-semibold">New Issue</h2>
             <p className="text-sm text-muted-foreground">
-              Creates a Linear issue with the agent label. The dispatcher will automatically
-              pick it up and spawn an agent to work on it.
+              Creates an issue and the dispatcher will automatically spawn an agent to work on it.
             </p>
 
             {result ? (
@@ -78,6 +101,29 @@ export function SpawnButton({ projectName }: { projectName: string }) {
               </div>
             ) : (
               <form onSubmit={handleSubmit} className="space-y-3">
+                {/* Tracker selector */}
+                {trackers.length > 1 && (
+                  <div>
+                    <label className="text-sm font-medium">Create in</label>
+                    <div className="flex gap-1 bg-muted rounded-lg p-1 mt-1">
+                      {trackers.map((t) => (
+                        <button
+                          key={t.name}
+                          type="button"
+                          className={`flex-1 text-sm py-1.5 rounded-md transition-colors ${
+                            selectedTracker === t.name
+                              ? "bg-background shadow font-medium"
+                              : "text-muted-foreground"
+                          }`}
+                          onClick={() => setSelectedTracker(t.name)}
+                        >
+                          {t.displayName}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div>
                   <label className="text-sm font-medium">Title</label>
                   <Input

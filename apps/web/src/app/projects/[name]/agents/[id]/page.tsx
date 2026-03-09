@@ -1,13 +1,30 @@
+import { existsSync, lstatSync, readFileSync } from "fs";
+import { join } from "path";
 import * as store from "@/lib/store";
 import { notFound } from "next/navigation";
 import { AgentActions } from "./agent-actions";
 import { AgentContent } from "./agent-content";
 import { AgentLiveHeader } from "./agent-live-header";
+import { AgentNextSteps } from "./agent-live-header";
 import { AgentStateProvider } from "./agent-state-context";
 import { ServicesBar } from "./services-bar";
 import { RemotePreviewBar } from "./remote-preview-bar";
 import { getAggregate } from "@/lib/agent-aggregate";
 import { resolveTrackerConfig } from "@/lib/issue-trackers/registry";
+
+function detectGitMode(agentDir: string): "branch" | "worktree" | null {
+  const dotGit = join(agentDir, ".git");
+  if (!existsSync(dotGit)) return null;
+  // git worktree creates a .git *file* (not directory) containing "gitdir: ..."
+  const stat = lstatSync(dotGit);
+  if (stat.isFile()) {
+    try {
+      const content = readFileSync(dotGit, "utf-8");
+      if (content.trim().startsWith("gitdir:")) return "worktree";
+    } catch {}
+  }
+  return "branch";
+}
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +51,7 @@ export default async function AgentDetailPage({
     // best effort
   }
   const freshAgent = agent;
+  const gitMode = freshAgent.agentDir ? detectGitMode(freshAgent.agentDir) : null;
 
   const runtimeConfig = store.getProjectJsonField<{
     services?: Array<{ name: string; cmd: string; port: number }>;
@@ -61,7 +79,7 @@ export default async function AgentDetailPage({
     >
       <div className="flex flex-col h-full">
         {/* Header — fixed, never scrolls */}
-        <div className="shrink-0 bg-background px-6 py-3 border-b border-border z-10">
+        <div className="shrink-0 bg-background px-6 py-3 border-b border-border z-10 max-h-[40vh] overflow-y-auto">
           {agentState ? (
             <AgentLiveHeader
               issueId={freshAgent.issueId}
@@ -71,11 +89,12 @@ export default async function AgentDetailPage({
               createdBy={freshAgent.createdBy}
               issueCreatedAt={freshAgent.issueCreatedAt}
               branch={freshAgent.branch || ""}
+              gitMode={gitMode}
             />
           ) : (
             <div className="flex-1 min-w-0">
               <h1 className="text-2xl font-bold">{freshAgent.issueId}</h1>
-              <p className="text-muted-foreground mt-1">{freshAgent.title}</p>
+              <p className="text-muted-foreground mt-1 break-words">{(freshAgent.title || "").replace(/!\[[^\]]*\]\([^)]+\)/g, "").trim()}</p>
               {(freshAgent.createdBy || freshAgent.issueCreatedAt) && (
                 <p className="text-xs text-muted-foreground mt-1">
                   {freshAgent.createdBy && <span>Reporter: {freshAgent.createdBy}</span>}
@@ -126,6 +145,13 @@ export default async function AgentDetailPage({
           {/* AgentActions hosts confirmation dialogs only (no visible buttons) */}
           <AgentActions agentId={freshAgent.issueId} projectName={projectName} uiStatus={uiStatus} />
         </div>
+
+        {/* Next steps — always visible between header and content */}
+        {agentState && (
+          <div className="shrink-0 bg-background px-6 py-1.5 border-b border-border">
+            <AgentNextSteps issueId={freshAgent.issueId} projectName={projectName} />
+          </div>
+        )}
 
         {/* Content — fills remaining space, tabs manage their own scroll */}
         <div className="flex-1 min-h-0">

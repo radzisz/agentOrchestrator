@@ -102,6 +102,9 @@ export async function createAndStartContainer(
 ): Promise<void> {
   const args: string[] = ["docker", "create"];
 
+  // Use tini as PID 1 to reap zombie processes (orphaned tail/sleep from reattach)
+  args.push("--init");
+
   args.push("--name", opts.name);
 
   // Environment variables

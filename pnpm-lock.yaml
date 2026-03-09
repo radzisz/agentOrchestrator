@@ -6,14 +6,7 @@ settings:
 
 importers:
 
-  .:
-    devDependencies:
-      typescript:
-        specifier: ^5.7.0
-        version: 5.9.3
-      vitest:
-        specifier: ^4.0.18
-        version: 4.0.18(@types/node@22.19.15)(jiti@2.6.1)(lightningcss@1.31.1)
+  .: {}
 
   apps/web:
     dependencies:
@@ -177,6 +170,19 @@ importers:
         version: 5.9.3
 
   packages/ai-claude-code:
+    dependencies:
+      '@orchestrator/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.15
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
+  packages/ai-google:
     dependencies:
       '@orchestrator/contracts':
         specifier: workspace:*

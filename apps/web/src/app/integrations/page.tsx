@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { IntegrationConfigEditor } from "./integration-config";
 import { IntegrationLogs } from "./integration-logs";
-import { ChevronDown, ChevronRight, ChevronUp, Star, Trash2, Plus, GripVertical } from "lucide-react";
+import { ChevronDown, ChevronRight, ChevronUp, Star, Trash2, Plus, GripVertical, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
@@ -286,6 +286,7 @@ interface IMProviderInstanceData {
   type: "telegram";
   name: string;
   isDefault: boolean;
+  enabled: boolean;
   config: Record<string, string>;
 }
 
@@ -293,11 +294,28 @@ function IMProvidersSection() {
   const [instances, setInstances] = useState<IMProviderInstanceData[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [formName, setFormName] = useState("Telegram Bot");
   const [formType] = useState<"telegram">("telegram");
   const [formBotToken, setFormBotToken] = useState("");
   const [formChatId, setFormChatId] = useState("");
   const [saving, setSaving] = useState(false);
+
+  async function toggleInstanceEnabled(inst: IMProviderInstanceData) {
+    const next = !inst.enabled;
+    setInstances((prev) => prev.map((i) => i.id === inst.id ? { ...i, enabled: next } : i));
+    try {
+      await fetch("/api/im-providers", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: inst.id, enabled: next }),
+      });
+      toast.success(next ? `${inst.name} enabled` : `${inst.name} disabled`);
+    } catch {
+      setInstances((prev) => prev.map((i) => i.id === inst.id ? { ...i, enabled: !next } : i));
+      toast.error("Failed to toggle");
+    }
+  }
 
   async function load() {
     try {
@@ -323,10 +341,7 @@ function IMProvidersSection() {
       });
       if (!resp.ok) throw new Error("Failed");
       toast.success("IM provider added");
-      setShowForm(false);
-      setFormName("Telegram Bot");
-      setFormBotToken("");
-      setFormChatId("");
+      resetForm();
       await load();
     } catch {
       toast.error("Failed to add IM provider");
@@ -347,6 +362,45 @@ function IMProvidersSection() {
     } catch {
       toast.error("Failed");
     }
+  }
+
+  function handleStartEdit(inst: IMProviderInstanceData) {
+    setEditingId(inst.id);
+    setFormName(inst.name);
+    setFormBotToken(inst.config.botToken || "");
+    setFormChatId(inst.config.chatId || "");
+    setShowForm(true);
+  }
+
+  async function handleSaveEdit() {
+    if (!editingId || !formName.trim()) return;
+    setSaving(true);
+    try {
+      const config: Record<string, string> = {};
+      if (formBotToken) config.botToken = formBotToken;
+      if (formChatId) config.chatId = formChatId;
+      const resp = await fetch("/api/im-providers", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: editingId, name: formName, config }),
+      });
+      if (!resp.ok) throw new Error("Failed");
+      toast.success("IM provider updated");
+      resetForm();
+      await load();
+    } catch {
+      toast.error("Failed to update IM provider");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function resetForm() {
+    setShowForm(false);
+    setEditingId(null);
+    setFormName("Telegram Bot");
+    setFormBotToken("");
+    setFormChatId("");
   }
 
   async function handleDelete(id: string) {
@@ -403,8 +457,18 @@ function IMProvidersSection() {
           )}
 
           {instances.map((inst) => (
-            <div key={inst.id} className="flex items-center justify-between border rounded px-3 py-2">
+            <div key={inst.id} className={`flex items-center justify-between border rounded px-3 py-2 ${!inst.enabled ? "opacity-50" : ""}`}>
               <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={inst.enabled}
+                  title={inst.enabled ? "Enabled — click to disable" : "Disabled — click to enable"}
+                  className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${inst.enabled ? "bg-primary" : "bg-muted"}`}
+                  onClick={() => toggleInstanceEnabled(inst)}
+                >
+                  <span className={`pointer-events-none inline-block h-3 w-3 rounded-full bg-background shadow ring-0 transition-transform ${inst.enabled ? "translate-x-3" : "translate-x-0"}`} />
+                </button>
                 <button onClick={() => handleSetDefault(inst.id)}
                   className={`p-0.5 rounded ${inst.isDefault ? "text-yellow-400" : "text-muted-foreground hover:text-yellow-400"}`}
                   title={inst.isDefault ? "Default" : "Set as default"}>
@@ -417,9 +481,14 @@ function IMProvidersSection() {
                   <Badge variant="outline" className="text-[10px] border-green-600 text-green-400">Bot Token set</Badge>
                 )}
               </div>
-              <button onClick={() => handleDelete(inst.id)} className="text-muted-foreground hover:text-destructive p-1">
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button onClick={() => handleStartEdit(inst)} className="text-muted-foreground hover:text-foreground p-1" title="Edit">
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
+                <button onClick={() => handleDelete(inst.id)} className="text-muted-foreground hover:text-destructive p-1" title="Delete">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
           ))}
 
@@ -449,13 +518,15 @@ function IMProvidersSection() {
                   placeholder="-100..." value={formChatId} onChange={(e) => setFormChatId(e.target.value)} />
               </div>
               <div className="flex gap-2">
-                <Button size="sm" onClick={handleAdd} disabled={saving || !formName.trim()}>{saving ? "..." : "Add"}</Button>
-                <Button size="sm" variant="ghost" onClick={() => setShowForm(false)}>Cancel</Button>
+                <Button size="sm" onClick={editingId ? handleSaveEdit : handleAdd} disabled={saving || !formName.trim()}>
+                  {saving ? "..." : editingId ? "Save" : "Add"}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={resetForm}>Cancel</Button>
               </div>
             </div>
           ) : (
             <Button size="sm" variant="outline" className="w-full"
-              onClick={(e) => { e.stopPropagation(); setShowForm(true); }}>
+              onClick={(e) => { e.stopPropagation(); setEditingId(null); setShowForm(true); }}>
               <Plus className="h-3.5 w-3.5 mr-1" /> Add IM Provider
             </Button>
           )}
@@ -592,7 +663,7 @@ function RepoProvidersSection() {
         <CardContent className="space-y-3 pt-0">
           {instances.length === 0 && (
             <p className="text-xs text-muted-foreground">
-              No repo provider instances configured. Add one to enable GitHub/GitLab integration.
+              No repo provider instances configured. Add one to enable Git integration (push, PR creation, etc.).
             </p>
           )}
 
@@ -942,11 +1013,258 @@ function IssueTrackersSection() {
 // ---------------------------------------------------------------------------
 // Integrations Page
 // ---------------------------------------------------------------------------
+// Runtime Environments Section (Supabase / Netlify / Vercel)
+// ---------------------------------------------------------------------------
+
+interface RtenvInstanceData {
+  id: string;
+  type: string;
+  name: string;
+  enabled: boolean;
+  config: Record<string, string>;
+}
+
+interface RtenvSchemaData {
+  type: string;
+  displayName: string;
+  fields: Array<{ key: string; label: string; type: string; required?: boolean; description?: string }>;
+  projectFields: Array<{ key: string; label: string; type: string; required?: boolean; description?: string }>;
+}
+
+function RuntimeEnvsSection() {
+  const [instances, setInstances] = useState<RtenvInstanceData[]>([]);
+  const [schemas, setSchemas] = useState<RtenvSchemaData[]>([]);
+  const [isOpen, setIsOpen] = useState(false);
+  const [showForm, setShowForm] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [formType, setFormType] = useState("supabase");
+  const [formName, setFormName] = useState("Supabase");
+  const [formConfig, setFormConfig] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+
+  async function load() {
+    try {
+      const resp = await fetch("/api/rtenv-providers");
+      const data = await resp.json();
+      setInstances(data.instances || []);
+      setSchemas(data.schemas || []);
+    } catch {}
+  }
+
+  useEffect(() => { load(); }, []);
+
+  const currentSchema = schemas.find((s) => s.type === formType);
+
+  function resetForm() {
+    setShowForm(false);
+    setEditingId(null);
+    setFormType("supabase");
+    setFormName("Supabase");
+    setFormConfig({});
+  }
+
+  function handleStartEdit(inst: RtenvInstanceData) {
+    setEditingId(inst.id);
+    setFormType(inst.type);
+    setFormName(inst.name);
+    setFormConfig({ ...inst.config });
+    setShowForm(true);
+  }
+
+  async function handleSave() {
+    if (!formName.trim()) return;
+    setSaving(true);
+    try {
+      const method = editingId ? "PUT" : "POST";
+      const body = editingId
+        ? { id: editingId, name: formName, type: formType, config: formConfig }
+        : { type: formType, name: formName, config: formConfig };
+      const resp = await fetch("/api/rtenv-providers", {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) throw new Error("Failed");
+      toast.success(editingId ? "Updated" : "Added");
+      resetForm();
+      await load();
+    } catch {
+      toast.error("Failed to save");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleToggle(inst: RtenvInstanceData) {
+    const next = !inst.enabled;
+    setInstances((prev) => prev.map((i) => i.id === inst.id ? { ...i, enabled: next } : i));
+    try {
+      await fetch("/api/rtenv-providers", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: inst.id, enabled: next }),
+      });
+      toast.success(next ? `${inst.name} enabled` : `${inst.name} disabled`);
+    } catch {
+      setInstances((prev) => prev.map((i) => i.id === inst.id ? { ...i, enabled: !next } : i));
+      toast.error("Failed");
+    }
+  }
+
+  async function handleDelete(id: string) {
+    try {
+      await fetch("/api/rtenv-providers", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      toast.success("Deleted");
+      await load();
+    } catch {
+      toast.error("Failed");
+    }
+  }
+
+  const typeNames: Record<string, string> = {};
+  for (const s of schemas) typeNames[s.type] = s.displayName;
+
+  return (
+    <Card>
+      <CardHeader
+        className="cursor-pointer select-none"
+        onClick={() => setIsOpen(!isOpen)}
+      >
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {isOpen ? (
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-4 w-4 text-muted-foreground" />
+            )}
+            <CardTitle>Runtime Environments</CardTitle>
+
+            {!isOpen && instances.length > 0 && (
+              <span className="text-xs text-muted-foreground">
+                {instances.filter((i) => i.enabled).length} active
+              </span>
+            )}
+          </div>
+          {instances.length > 0 ? (
+            <Badge className="bg-green-600 text-white border-0 text-xs px-2.5">{instances.length} configured</Badge>
+          ) : (
+            <Badge variant="outline" className="text-xs border-muted-foreground text-muted-foreground px-2.5">
+              Not configured
+            </Badge>
+          )}
+        </div>
+      </CardHeader>
+
+      {isOpen && (
+        <CardContent className="space-y-3 pt-0">
+          {instances.length === 0 && (
+            <p className="text-xs text-muted-foreground">
+              No runtime environment instances configured. Add Supabase, Netlify, or Vercel to enable remote previews.
+            </p>
+          )}
+
+          {instances.map((inst) => (
+            <div key={inst.id} className={`flex items-center justify-between border rounded px-3 py-2 ${!inst.enabled ? "opacity-50" : ""}`}>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={inst.enabled}
+                  title={inst.enabled ? "Enabled" : "Disabled"}
+                  className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${inst.enabled ? "bg-primary" : "bg-muted"}`}
+                  onClick={() => handleToggle(inst)}
+                >
+                  <span className={`pointer-events-none inline-block h-3 w-3 rounded-full bg-background shadow ring-0 transition-transform ${inst.enabled ? "translate-x-3" : "translate-x-0"}`} />
+                </button>
+                <span className="text-sm font-medium">{inst.name}</span>
+                <Badge variant="outline" className="text-[10px]">{typeNames[inst.type] || inst.type}</Badge>
+                {inst.config.accessToken && (
+                  <Badge variant="outline" className="text-[10px] border-green-600 text-green-400">Token set</Badge>
+                )}
+                {inst.config.authToken && (
+                  <Badge variant="outline" className="text-[10px] border-green-600 text-green-400">Token set</Badge>
+                )}
+              </div>
+              <div className="flex items-center gap-1">
+                <button onClick={() => handleStartEdit(inst)} className="text-muted-foreground hover:text-foreground p-1" title="Edit">
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
+                <button onClick={() => handleDelete(inst.id)} className="text-muted-foreground hover:text-destructive p-1" title="Delete">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          ))}
+
+          {showForm ? (
+            <div className="border rounded p-3 space-y-2">
+              <div>
+                <label className="text-xs text-muted-foreground block mb-1">Type</label>
+                <select
+                  className="w-full px-2 py-1 text-sm border rounded bg-background"
+                  value={formType}
+                  disabled={!!editingId}
+                  onChange={(e) => {
+                    setFormType(e.target.value);
+                    const schema = schemas.find((s) => s.type === e.target.value);
+                    setFormName(schema?.displayName || e.target.value);
+                    setFormConfig({});
+                  }}
+                >
+                  {schemas.map((s) => (
+                    <option key={s.type} value={s.type}>{s.displayName}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground block mb-1">Name</label>
+                <input className="w-full px-2 py-1 text-sm border rounded bg-background" autoComplete="off"
+                  value={formName} onChange={(e) => setFormName(e.target.value)} />
+              </div>
+              {currentSchema?.fields.map((f) => (
+                <div key={f.key}>
+                  <label className="text-xs text-muted-foreground block mb-1">{f.label}</label>
+                  <input
+                    className="w-full px-2 py-1 text-sm border rounded bg-background font-mono"
+                    type={f.type === "secret" ? "password" : "text"}
+                    placeholder={f.description}
+                    value={formConfig[f.key] || ""}
+                    onChange={(e) => setFormConfig((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                  />
+                </div>
+              ))}
+              <div className="flex gap-2">
+                <Button size="sm" onClick={handleSave} disabled={saving || !formName.trim()}>
+                  {saving ? "..." : editingId ? "Save" : "Add"}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={resetForm}>Cancel</Button>
+              </div>
+            </div>
+          ) : (
+            <Button size="sm" variant="outline" className="w-full"
+              onClick={(e) => { e.stopPropagation(); setEditingId(null); setShowForm(true); }}>
+              <Plus className="h-3.5 w-3.5 mr-1" /> Add Runtime Environment
+            </Button>
+          )}
+        </CardContent>
+      )}
+    </Card>
+  );
+}
+
+
+
+
+// ---------------------------------------------------------------------------
 
 const HIDDEN_INTEGRATION_NAMES = new Set(["linear", "sentry", "telegram"]);
 
 const STORAGE_KEY = "integrations-section-order";
-const DEFAULT_ORDER = ["ai-providers", "messaging", "issue-trackers", "repo-providers", "github", "local-drive"];
+const DEFAULT_ORDER = ["ai-providers", "messaging", "issue-trackers", "repo-providers", "runtime-envs", "github", "local-drive"];
 
 function loadOrder(): string[] {
   if (typeof window === "undefined") return DEFAULT_ORDER;
@@ -1035,6 +1353,7 @@ export default function IntegrationsPage() {
     "messaging": () => <IMProvidersSection />,
     "issue-trackers": () => <IssueTrackersSection />,
     "repo-providers": () => <RepoProvidersSection />,
+    "runtime-envs": () => <RuntimeEnvsSection />,
   };
 
   // Add "other" integrations as sections

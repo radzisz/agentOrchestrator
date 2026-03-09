@@ -2,6 +2,7 @@ import { existsSync } from "fs";
 import { eventBus } from "@/lib/event-bus";
 import * as store from "@/lib/store";
 import * as cmd from "@/lib/cmd";
+import * as gitSvc from "@/services/git";
 import { tryGetAggregate, getAggregate } from "@/lib/agent-aggregate";
 
 /**
@@ -111,13 +112,13 @@ async function doCheck(): Promise<void> {
           }
         }
 
-        // Check if branch still exists on remote — always use local git (host filesystem)
-        const lsRemote = await cmd.git(`-C "${agent.agentDir}" ls-remote --heads origin "${branch}"`, { source: SRC, timeout: 10000 });
+        // Check if branch still exists on remote
+        const branchExists = await gitSvc.branchExistsOnRemote(agent.agentDir, branch);
 
-        // Distinguish between "branch doesn't exist" (ok + empty stdout)
-        // and "ls-remote failed" (network/auth error). Only treat empty output
-        // from a successful command as branch-gone.
-        if (lsRemote.ok && !lsRemote.stdout.trim()) {
+        // null = network error → skip (don't assume branch is gone)
+        if (branchExists === null) return;
+
+        if (!branchExists) {
           let claudeRunning = false;
           if (containerAlive && agent.containerName) {
             const r = await cmd.dockerExec(agent.containerName,
@@ -136,26 +137,21 @@ async function doCheck(): Promise<void> {
           }
           return;
         }
-        // ls-remote failed (auth/network error) — skip, don't assume branch is gone
-        if (!lsRemote.ok) return;
 
-        const fetchR = await cmd.git(`-C "${agent.agentDir}" fetch origin "${branch}"`, { source: SRC, timeout: 10000 });
+        // Branch exists — fetch and check for new commits
+        await gitSvc.fetchOrigin(agent.agentDir, branch, { timeout: 10_000 });
 
-        const logR = await cmd.git(`-C "${agent.agentDir}" log -1 --format="%H %s" "origin/${branch}"`, { source: SRC });
+        const commit = await gitSvc.getLastCommit(agent.agentDir, `origin/${branch}`);
+        if (!commit) return;
 
-        if (!logR.ok || !logR.stdout) return;
-
-        const [hash, ...msgParts] = logR.stdout.split(" ");
-        const message = msgParts.join(" ");
-
-        if (lastSeen.get(key) !== hash) {
-          lastSeen.set(key, hash);
-          store.appendLog(project.path, `agent-${agent.issueId}-lifecycle`, `commit ${hash} ${message}`);
+        if (lastSeen.get(key) !== commit.sha) {
+          lastSeen.set(key, commit.sha);
+          store.appendLog(project.path, `agent-${agent.issueId}-lifecycle`, `commit ${commit.sha} ${commit.message}`);
           eventBus.emit("agent:commit", {
             agentId: agent.issueId,
             issueId: agent.issueId,
-            message,
-            hash,
+            message: commit.message,
+            hash: commit.sha,
           });
         }
       } catch {
@@ -178,10 +174,8 @@ async function doCheck(): Promise<void> {
 
       if (!servicesRunning) {
         cmd.logInfo(SRC, `Runtime ${rt.branch}: services stopped → STOPPED`);
-        rt.status = "STOPPED";
-        rt.servicesEnabled = false;
-        rt.updatedAt = new Date().toISOString();
-        store.saveRuntime(project.path, rt.branch, rt.type, rt);
+        const { reconcileDeadRuntime } = require("@/services/runtime-reconcile");
+        reconcileDeadRuntime(project.path, rt);
       }
     }));
   }
@@ -195,8 +189,6 @@ async function autoRebaseStoppedAgents(
   project: store.ProjectWithConfig,
   agents: store.AgentData[],
 ): Promise<void> {
-  // Only rebase agents that are: active, stopped (not running), not merged,
-  // no current operation, and not already in a git op
   const candidates = agents.filter((a) => {
     const s = a.state;
     return a.branch && a.agentDir &&
@@ -209,40 +201,28 @@ async function autoRebaseStoppedAgents(
   });
   if (candidates.length === 0) return;
 
-  // Get default branch name
-  const defaultBranch = await detectDefaultBranch(project.path);
+  const defaultBranch = await gitSvc.getDefaultBranch(project.path);
 
   for (const agent of candidates) {
     try {
       const agentDir = agent.agentDir!;
       const branch = agent.branch!;
 
-      // Verify .git exists on host
       if (!existsSync(`${agentDir}/.git`)) {
         cmd.logInfo(SRC, `auto-rebase:${agent.issueId}: skipping — no .git in ${agentDir}`);
         continue;
       }
 
       // Fetch latest default branch — deepen to ensure merge-base is reachable in shallow clones
-      const fetchR = await cmd.git(`-C "${agentDir}" fetch origin "${defaultBranch}" --quiet --deepen=50`, {
-        source: SRC, timeout: 15000,
-      });
-      if (!fetchR.ok) {
-        cmd.logInfo(SRC, `auto-rebase:${agent.issueId}: fetch failed — ${fetchR.stderr}`);
+      const fetched = await gitSvc.fetchOrigin(agentDir, defaultBranch, { deepen: 50, quiet: true, timeout: 15_000 });
+      if (!fetched) {
+        cmd.logInfo(SRC, `auto-rebase:${agent.issueId}: fetch failed`);
         continue;
       }
 
       // Check if agent branch is behind default branch
-      const behindR = await cmd.git(
-        `-C "${agentDir}" rev-list --count "${branch}..origin/${defaultBranch}"`,
-        { source: SRC, timeout: 5000 },
-      );
-      if (!behindR.ok) {
-        cmd.logInfo(SRC, `auto-rebase:${agent.issueId}: rev-list failed — ${behindR.stderr}`);
-        continue;
-      }
-
-      const behind = parseInt(behindR.stdout.trim(), 10);
+      const { ref: baseRef } = await gitSvc.getBaseRef(agentDir);
+      const { behind } = await gitSvc.getAheadBehind(agentDir, branch);
       if (!behind || behind === 0) continue;
 
       cmd.logInfo(SRC, `${agent.issueId}: branch is ${behind} commit(s) behind ${defaultBranch} → auto-rebase`);
@@ -252,7 +232,6 @@ async function autoRebaseStoppedAgents(
         `auto-rebase: branch ${behind} commit(s) behind ${defaultBranch}`,
       );
 
-      // Trigger rebase — this handles conflicts automatically (wakes agent if needed)
       const agg = getAggregate(project.name, agent.issueId);
       await agg.rebase();
     } catch (e) {
@@ -265,31 +244,10 @@ async function autoRebaseStoppedAgents(
 // Detect branches merged outside orchestrator (e.g. via GitHub UI)
 // ---------------------------------------------------------------------------
 
-/** Detect default branch from origin/HEAD, fallback to main then master. */
-async function detectDefaultBranch(projectPath: string): Promise<string> {
-  const refR = await cmd.git(
-    `-C "${projectPath}" symbolic-ref refs/remotes/origin/HEAD`,
-    { source: SRC, timeout: 5000 },
-  );
-  if (refR.ok && refR.stdout) {
-    return refR.stdout.replace("refs/remotes/origin/", "");
-  }
-  // Fallback: check if origin/main exists
-  const mainR = await cmd.git(
-    `-C "${projectPath}" rev-parse --verify origin/main`,
-    { source: SRC, timeout: 5000 },
-  );
-  if (mainR.ok) return "main";
-  return "master";
-}
-
-const STALE_OP_MS = 5 * 60 * 1000; // 5 minutes
-
 async function detectExternalMerges(
   project: store.ProjectWithConfig,
   agents: store.AgentData[],
 ): Promise<void> {
-  // Only check active agents that are not already merged/done
   const candidates = agents.filter((a) => {
     const ts = a.state?.trackerStatus;
     const lc = a.state?.lifecycle;
@@ -301,33 +259,17 @@ async function detectExternalMerges(
   });
   if (candidates.length === 0) return;
 
-  // Fetch default branch name
-  const defaultBranch = await detectDefaultBranch(project.path);
+  const defaultBranch = await gitSvc.getDefaultBranch(project.path);
 
   // Fetch latest from remote once
-  await cmd.git(`-C "${project.path}" fetch origin "${defaultBranch}" --quiet`, {
-    source: SRC,
-    timeout: 15000,
-  });
+  await gitSvc.fetchOrigin(project.path, defaultBranch, { quiet: true, timeout: 15_000 });
 
   for (const agent of candidates) {
     try {
-      // Check if agent branch is fully merged into origin/defaultBranch
-      // git branch -r --merged origin/main | grep agent/ISSUE
-      const mergedR = await cmd.git(
-        `-C "${project.path}" branch -r --merged "origin/${defaultBranch}"`,
-        { source: SRC, timeout: 10000 },
-      );
-      if (!mergedR.ok) continue;
-
-      const isMerged = mergedR.stdout
-        .split("\n")
-        .some((l) => l.trim() === `origin/${agent.branch}`);
-
-      if (isMerged) {
+      const merged = await gitSvc.isBranchMerged(project.path, agent.branch!);
+      if (merged) {
         cmd.logInfo(SRC, `${agent.issueId}: branch ${agent.branch} merged into ${defaultBranch} externally → DONE`);
 
-        // Update aggregate so the guard prevents re-processing
         const agg = tryGetAggregate(project.name, agent.issueId);
         if (agg) {
           agg.reportBranchMerged();
@@ -352,6 +294,8 @@ async function detectExternalMerges(
 // Clear stale currentOperation left by server crashes
 // ---------------------------------------------------------------------------
 
+const STALE_OP_MS = 5 * 60 * 1000; // 5 minutes
+
 function reconcileStaleOperations(
   project: store.ProjectWithConfig,
   agents: store.AgentData[],
@@ -361,13 +305,16 @@ function reconcileStaleOperations(
     const elapsed = Date.now() - new Date(agent.currentOperation.startedAt).getTime();
     if (elapsed <= STALE_OP_MS) continue;
 
-    cmd.logInfo(SRC, `${agent.issueId}: stale currentOperation "${agent.currentOperation.name}" (${Math.round(elapsed / 1000)}s) → clearing`);
-    agent.currentOperation = null;
-    store.saveAgent(project.path, agent.issueId, agent);
-    store.appendLog(
-      project.path,
-      `agent-${agent.issueId}-lifecycle`,
-      `cleared stale currentOperation after ${Math.round(elapsed / 1000)}s (server crash recovery)`,
-    );
+    const reason = `stale ${agent.currentOperation.name} after ${Math.round(elapsed / 1000)}s (server crash recovery)`;
+    cmd.logInfo(SRC, `${agent.issueId}: ${reason} → clearing`);
+
+    const agg = tryGetAggregate(project.name, agent.issueId);
+    if (agg) {
+      agg.clearStaleOperation(reason);
+    } else {
+      agent.currentOperation = null;
+      store.saveAgent(project.path, agent.issueId, agent);
+      store.appendLog(project.path, `agent-${agent.issueId}-lifecycle`, `cleared stale currentOperation: ${reason}`);
+    }
   }
 }

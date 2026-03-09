@@ -840,7 +840,7 @@ function CheckoutBranchDialog({
           {loading && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground py-4 justify-center">
               <Loader2 className="h-4 w-4 animate-spin" />
-              Loading branches from GitHub...
+              Loading remote branches...
             </div>
           )}
           {error && <p className="text-sm text-destructive">{error}</p>}

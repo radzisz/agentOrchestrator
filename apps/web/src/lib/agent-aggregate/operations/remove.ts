@@ -46,7 +46,7 @@ export async function removeAgent(
   if (opts?.deleteBranch !== false) {
     await gitOps.deleteRemoteBranch(ctx.agent, ctx.projectPath).catch(() => {});
   }
-  await gitOps.removeRepo(ctx.agent).catch(() => {});
+  await gitOps.removeRepo(ctx.agent, ctx.projectPath).catch(() => {});
 
   ctx.persist();
   ctx.opLog("remove", "cleanup complete");

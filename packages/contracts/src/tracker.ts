@@ -47,4 +47,5 @@ export abstract class BaseTracker {
   hasLabel?(issue: TrackerIssue, label: string): boolean;
   async getIssue?(config: Record<string, string>, externalId: string): Promise<TrackerIssue | null>;
   async reassignOnDone?(config: Record<string, string>, issue: TrackerIssue): Promise<void>;
+  async createIssue?(config: Record<string, string>, title: string, description: string, labels: string[]): Promise<{ externalId: string; identifier: string }>;
 }

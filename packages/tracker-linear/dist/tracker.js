@@ -175,5 +175,31 @@ export class LinearTracker extends BaseTracker {
             return null;
         return linearIssueToTracker(issue);
     }
+    async createIssue(config, title, description, labels) {
+        var _a;
+        const apiKey = config.apiKey;
+        if (!apiKey)
+            throw new Error("Linear API key not configured");
+        let teamId = config.teamId;
+        if (!teamId) {
+            const teamKey = config.teamKey;
+            if (!teamKey)
+                throw new Error("Linear team not configured");
+            const team = await linear.resolveTeam(apiKey, teamKey);
+            if (!team)
+                throw new Error(`Could not resolve Linear team: ${teamKey}`);
+            teamId = team.id;
+            (_a = this.onTeamResolved) === null || _a === void 0 ? void 0 : _a.call(this, config, teamId);
+        }
+        // Resolve label IDs
+        const labelIds = [];
+        for (const labelName of labels) {
+            const id = await linear.getLabelId(apiKey, teamId, labelName);
+            if (id)
+                labelIds.push(id);
+        }
+        const issue = await linear.createIssue(apiKey, teamId, title, description, labelIds);
+        return { externalId: issue.id, identifier: issue.identifier };
+    }
 }
 //# sourceMappingURL=tracker.js.map

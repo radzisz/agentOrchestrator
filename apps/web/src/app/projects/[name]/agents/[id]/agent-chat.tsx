@@ -11,6 +11,17 @@ interface ChatMessage {
   ts: string;
 }
 
+/** Format message timestamp — time only for today, date + time for older. */
+function formatMsgTime(ts: string): string {
+  const d = new Date(ts);
+  const now = new Date();
+  const isToday = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  if (isToday) {
+    return d.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+  return d.toLocaleString("pl-PL", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 /** Map of Linear CDN image URLs to local proxy filenames (populated on first encounter). */
 const imageProxyCache = new Map<string, string>();
 let imageProxyCounter = 0;
@@ -42,6 +53,50 @@ function resolveImageUrl(url: string, projectName: string, agentId: string): str
   }
   return url;
 }
+
+// ---------------------------------------------------------------------------
+// Agent status JSON parsing
+// ---------------------------------------------------------------------------
+
+interface AgentStatus {
+  status: "done" | "error" | "more_information_required";
+  description: string;
+}
+
+const STATUS_JSON_RE = /```json\s*\n?\s*\{[^}]*"status"\s*:\s*"[^"]+"/;
+
+/** Try to extract a status JSON block from agent output. */
+function parseAgentStatus(text: string): { status: AgentStatus | null; cleanText: string } {
+  if (!text || !STATUS_JSON_RE.test(text)) return { status: null, cleanText: text };
+
+  // Match ```json ... ``` blocks containing "status"
+  const blockRe = /```json\s*\n?([\s\S]*?)```/g;
+  let match: RegExpExecArray | null;
+  let status: AgentStatus | null = null;
+  let cleanText = text;
+
+  while ((match = blockRe.exec(text)) !== null) {
+    try {
+      const parsed = JSON.parse(match[1].trim());
+      if (parsed.status && typeof parsed.description === "string") {
+        status = { status: parsed.status, description: parsed.description };
+        // Remove the JSON block from display text
+        cleanText = cleanText.replace(match[0], "").trim();
+        break;
+      }
+    } catch {
+      // Not valid JSON — skip
+    }
+  }
+
+  return { status, cleanText };
+}
+
+const STATUS_CHIP_STYLES: Record<string, { bg: string; text: string; label: string }> = {
+  done: { bg: "bg-green-100 dark:bg-green-900/30", text: "text-green-700 dark:text-green-400", label: "Done" },
+  error: { bg: "bg-red-100 dark:bg-red-900/30", text: "text-red-700 dark:text-red-400", label: "Error" },
+  more_information_required: { bg: "bg-amber-100 dark:bg-amber-900/30", text: "text-amber-700 dark:text-amber-400", label: "Needs info" },
+};
 
 /** Render text with markdown images as <img> (clickable lightbox) and bold as <strong>. */
 function renderMessageContent(
@@ -194,6 +249,40 @@ export function AgentChat({ agentId, projectName }: AgentChatProps) {
     }
   }
 
+  // Paste image from clipboard → upload → insert markdown
+  const [uploading, setUploading] = useState(false);
+  async function handlePaste(e: React.ClipboardEvent) {
+    const items = Array.from(e.clipboardData.items);
+    const imageItem = items.find(item => item.type.startsWith("image/"));
+    if (!imageItem) return;
+
+    e.preventDefault();
+    setUploading(true);
+    try {
+      const file = imageItem.getAsFile();
+      if (!file) return;
+
+      const form = new FormData();
+      form.append("image", file);
+      const resp = await fetch(`/api/projects/${projectName}/tasks/images`, { method: "POST", body: form });
+      if (!resp.ok) return;
+      const { url } = await resp.json();
+
+      // Insert markdown image at cursor position
+      const ta = inputRef.current;
+      if (ta) {
+        const before = input.slice(0, ta.selectionStart);
+        const after = input.slice(ta.selectionEnd);
+        const md = `![screenshot](${url})`;
+        setInput(before + md + after);
+      } else {
+        setInput(prev => prev + `![screenshot](${url})`);
+      }
+    } finally {
+      setUploading(false);
+    }
+  }
+
   async function deleteMessage(index: number) {
     try {
       await fetch(`/api/projects/${projectName}/agents/${agentId}/messages`, {
@@ -214,35 +303,56 @@ export function AgentChat({ agentId, projectName }: AgentChatProps) {
             No messages yet. Send a message to start the conversation.
           </div>
         )}
-        {messages.map((msg, i) => (
-          <div
-            key={i}
-            className={`flex gap-1 group ${msg.role === "human" ? "justify-end" : "justify-start"}`}
-          >
-            {msg.role === "human" && (
-              <button
-                onClick={() => deleteMessage(i)}
-                className="self-start mt-2 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
-                title="Delete message"
-              >
-                <Trash2 className="h-3 w-3" />
-              </button>
-            )}
+        {messages.map((msg, i) => {
+          const isAgent = msg.role === "agent";
+          const parsed = isAgent ? parseAgentStatus(msg.text) : null;
+          const chipStyle = parsed?.status ? STATUS_CHIP_STYLES[parsed.status.status] : null;
+          const displayText = parsed ? parsed.cleanText : msg.text;
+
+          return (
             <div
-              className={`max-w-[80%] rounded-lg px-4 py-2 ${
-                msg.role === "human"
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted"
-              }`}
+              key={i}
+              className={`flex gap-1 group ${msg.role === "human" ? "justify-end" : "justify-start"}`}
             >
-              <div className="text-xs opacity-60 mb-1">
-                {msg.role === "human" ? "You" : "Agent"}{" "}
-                <span>{new Date(msg.ts).toLocaleTimeString()}</span>
+              {msg.role === "human" && (
+                <button
+                  onClick={() => deleteMessage(i)}
+                  className="self-start mt-2 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-destructive"
+                  title="Delete message"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              )}
+              <div
+                className={`max-w-[80%] rounded-lg px-4 py-2 ${
+                  msg.role === "human"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted"
+                }`}
+              >
+                <div className="text-xs opacity-60 mb-1 flex items-center gap-2">
+                  <span>
+                    {msg.role === "human" ? "You" : "Agent"}{" "}
+                    <span>{formatMsgTime(msg.ts)}</span>
+                  </span>
+                  {chipStyle && (
+                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${chipStyle.bg} ${chipStyle.text}`}>
+                      {chipStyle.label}
+                    </span>
+                  )}
+                </div>
+                {parsed?.status && (
+                  <div className="text-sm mb-1">{parsed.status.description}</div>
+                )}
+                {displayText && (
+                  <div className={`text-sm whitespace-pre-wrap break-words ${parsed?.status ? "text-muted-foreground text-xs mt-1" : ""}`}>
+                    {renderMessageContent(displayText, projectName, agentId, setLightboxSrc)}
+                  </div>
+                )}
               </div>
-              <div className="text-sm whitespace-pre-wrap break-words">{renderMessageContent(msg.text, projectName, agentId, setLightboxSrc)}</div>
             </div>
-          </div>
-        ))}
+          );
+        })}
 
         {/* Live status bubble — starting, running, or closing */}
         {(isActive || isClosing) && (
@@ -298,15 +408,23 @@ export function AgentChat({ agentId, projectName }: AgentChatProps) {
         )}
 
         <div className="flex gap-2 items-end">
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={isRunning ? "Queue a message for the agent..." : "Send a message to the agent..."}
-            rows={1}
-            className="flex-1 bg-transparent text-sm border border-border rounded px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-ring"
-          />
+          <div className="flex-1 relative">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              placeholder={isRunning ? "Queue a message for the agent..." : "Send a message to the agent... (Ctrl+V to paste images)"}
+              rows={1}
+              className="w-full bg-transparent text-sm border border-border rounded px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-ring"
+            />
+            {uploading && (
+              <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-muted-foreground">
+                Uploading...
+              </span>
+            )}
+          </div>
           {isRunning && input.trim() ? (
             <div className="flex gap-1">
               <Button

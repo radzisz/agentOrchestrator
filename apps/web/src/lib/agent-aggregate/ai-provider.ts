@@ -10,7 +10,7 @@ import { resolveTrackerConfig } from "@/lib/issue-trackers/registry";
 // Types
 // ---------------------------------------------------------------------------
 
-export type AIProviderType = "claude-code" | "aider";
+export type AIProviderType = "claude-code" | "aider" | "gemini";
 export type AiderBackend = "anthropic" | "openai" | "ollama";
 
 export interface AIProviderConfig {
@@ -217,12 +217,51 @@ function createAiderDriver(backend: AiderBackend, model?: string): AIProviderDri
 }
 
 // ---------------------------------------------------------------------------
+// Gemini driver
+// ---------------------------------------------------------------------------
+
+function filterGeminiOutput(raw: string): string {
+  if (!raw) return "";
+  const lines = raw.split("\n").filter((line) => {
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s/.test(line)) return false;
+    if (line.includes("[entrypoint]")) return false;
+    if (line.includes("[runtime]")) return false;
+    if (/^[\s│┌┐└┘─╭╮╰╯┤├]+$/.test(line)) return false;
+    return true;
+  });
+  return lines.join("\n").trim();
+}
+
+function createGeminiDriver(model: string): AIProviderDriver {
+  return {
+    processPattern: "gemini.*-p",
+    outputLogPath: "/tmp/gemini-output.log",
+
+    buildLaunchCommand(prompt: string): string {
+      const escaped = prompt.replace(/'/g, "'\\''");
+      return `gosu agent gemini -p --yes --model ${model} '${escaped}' 2>&1 | tee /tmp/gemini-output.log`;
+    },
+
+    buildEnvVars(_projectConfig: Record<string, string>, instanceConfig?: Record<string, string>): string[] {
+      return [
+        `GEMINI_API_KEY=${instanceConfig?.apiKey || process.env.GEMINI_API_KEY || ""}`,
+      ];
+    },
+
+    filterOutput: filterGeminiOutput,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
 export function getProviderDriver(config: AIProviderConfig): AIProviderDriver {
   if (config.provider === "aider") {
     return createAiderDriver(config.aiderBackend || "anthropic", config.model);
+  }
+  if (config.provider === "gemini") {
+    return createGeminiDriver(config.model || "gemini-2.5-pro");
   }
   return createClaudeCodeDriver(config.model || "sonnet");
 }

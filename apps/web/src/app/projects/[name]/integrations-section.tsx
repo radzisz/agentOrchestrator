@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RuntimeConfig, type RuntimeConfigData } from "./runtime-config";
-import { RemoteConfig, type RemoteConfigData } from "./remote-config";
+import { RemoteConfig, type ProjectRtenvConfig } from "./remote-config";
 import { SentryMapping } from "./sentry-mapping";
 
 export interface RuntimeModes {
@@ -18,7 +18,7 @@ export function IntegrationsSection({
   linearPreviewLabel,
   githubToken,
   runtimeConfig,
-  remoteConfigData,
+  rtenvConfig,
   sentryProjects,
   initialRuntimeModes,
 }: {
@@ -28,7 +28,7 @@ export function IntegrationsSection({
   linearPreviewLabel: string;
   githubToken: string | null;
   runtimeConfig: RuntimeConfigData | null;
-  remoteConfigData: RemoteConfigData;
+  rtenvConfig: ProjectRtenvConfig;
   sentryProjects: string[];
   initialRuntimeModes: RuntimeModes;
 }) {
@@ -65,8 +65,9 @@ export function IntegrationsSection({
           <span className="text-xs text-muted-foreground ml-2">
             Linear ({linearTeamKey})
             {githubToken ? " · GitHub" : ""}
-            {remoteConfigData.supabaseProjectRef ? " · Supabase" : ""}
-            {remoteConfigData.netlifySites.length > 0 ? " · Netlify" : ""}
+            {rtenvConfig.supabase?.enabled ? " · Supabase" : ""}
+            {rtenvConfig.netlify?.enabled ? " · Netlify" : ""}
+            {rtenvConfig.vercel?.enabled ? " · Vercel" : ""}
             {sentryProjects.length > 0 ? " · Sentry" : ""}
             {modes.local ? " · Local" : ""}
             {modes.remote ? " · Remote" : ""}
@@ -111,7 +112,7 @@ export function IntegrationsSection({
             />
             <RemoteConfig
               projectName={projectName}
-              initialData={remoteConfigData}
+              initialRtenvConfig={rtenvConfig}
               enabled={modes.remote}
               onToggle={() => toggleMode("remote")}
             />

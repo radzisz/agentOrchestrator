@@ -13,6 +13,10 @@ import {
   killProcesses,
 } from "@/lib/docker";
 import * as portManager from "./port-manager";
+import { eventBus } from "@/lib/event-bus";
+import { resolveTrackerConfig } from "@/lib/issue-trackers/registry";
+import { linearApi } from "@orchestrator/tracker-linear";
+import { resolveRtenvConfig } from "./rtenv-resolve";
 
 // Track host-mode child processes keyed by "projectPath:branch"
 const hostProcesses = new Map<string, ChildProcess[]>();
@@ -690,13 +694,43 @@ export async function startLocalHost(
 
     // Wait for ports to be listening on the host
     const portsToCheck = rewrittenServices.map(s => s.allocatedPort);
-    waitForHostPorts(portsToCheck, 60).then((allUp) => {
+    waitForHostPorts(portsToCheck, 60).then(async (allUp) => {
       const rt = store.getRuntime(project.path, branch, "LOCAL");
       if (rt && rt.status === "STARTING") {
         rt.status = allUp ? "RUNNING" : "FAILED";
         if (!allUp) rt.error = "Services did not start listening within timeout";
         rt.updatedAt = new Date().toISOString();
         store.saveRuntime(project.path, branch, "LOCAL", rt);
+      }
+
+      // Notify IM + tracker when preview is ready
+      if (allUp && agent) {
+        const issueId = agent.issueId;
+        const urls = rewrittenServices.map(s => `**${s.name}**: http://localhost:${s.allocatedPort}`);
+
+        // Emit event for IM (Telegram picks this up)
+        eventBus.emit("agent:preview", {
+          agentId: issueId,
+          issueId,
+          previewUrl: urls.join(" , "),
+        });
+
+        // Add tracker comment
+        try {
+          const linearCfg = resolveTrackerConfig(project.path, "linear");
+          if (agent.linearIssueUuid && linearCfg?.apiKey) {
+            const comment = [
+              `## 🖥 Local Preview`,
+              ``,
+              ...urls.map(u => `- ${u}`),
+              ``,
+              `Host mode — dostępne na localhost`,
+            ].join("\n");
+            await linearApi.addComment(linearCfg.apiKey, agent.linearIssueUuid, comment);
+          }
+        } catch (err) {
+          console.error(`[runtime-host] Failed to post tracker comment: ${err}`);
+        }
       }
     });
 
@@ -761,7 +795,8 @@ export async function startRemote(
 ): Promise<string> {
   const project = store.getProjectByName(projectName);
   if (!project) throw new Error(`Project not found: ${projectName}`);
-  const cfg = store.getProjectConfig(project.path);
+
+  const rtenv = resolveRtenvConfig(project.path);
 
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   const safe = safeBranchName(branch);
@@ -792,8 +827,8 @@ export async function startRemote(
     const netlifyDeploys: Array<{ siteName: string; deployId: string }> = [];
     const errors: string[] = [];
 
-    const supabaseAccessToken = cfg.SUPABASE_ACCESS_TOKEN;
-    const supabaseProjectRef = cfg.SUPABASE_PROJECT_REF;
+    const supabaseAccessToken = rtenv.supabase?.accessToken;
+    const supabaseProjectRef = rtenv.supabase?.projectRef;
 
     // Supabase branch
     if (supabaseAccessToken && supabaseProjectRef) {
@@ -901,8 +936,8 @@ export async function startRemote(
     }
 
     // Netlify
-    const netlifySites = store.getProjectJsonField<Array<{ name: string; siteName: string }>>(project.path, "NETLIFY_SITES") || [];
-    const netlifyAuthToken = cfg.NETLIFY_AUTH_TOKEN;
+    const netlifySites = rtenv.netlify?.sites || [];
+    const netlifyAuthToken = rtenv.netlify?.authToken;
 
     if (netlifySites.length > 0 && netlifyAuthToken) {
       const netlifyHeaders = {
@@ -1027,6 +1062,46 @@ export async function startRemote(
     runtime.operationLog = opLog;
     store.saveRuntime(project.path, branch, "REMOTE", runtime);
 
+    // Notify IM + tracker comment on successful remote preview start
+    if (finalStatus !== "FAILED") {
+      try {
+        const agent = store.listAgents(project.path).find((a) => a.branch === branch);
+        const issueId = agent?.issueId;
+
+        const urls: string[] = [];
+        if (previewUrl) urls.push(`**app**: ${previewUrl}`);
+        if (supabaseUrl) urls.push(`**Supabase**: \`${supabaseUrl}\``);
+
+        if (issueId) {
+          eventBus.emit("agent:preview", {
+            agentId: issueId,
+            issueId,
+            previewUrl,
+            supabaseUrl,
+          });
+        }
+
+        if (agent?.linearIssueUuid && urls.length > 0) {
+          const linearConfig = resolveTrackerConfig(project.path, "linear");
+          if (linearConfig?.apiKey) {
+            const expiresFormatted = runtime.expiresAt
+              ? new Date(runtime.expiresAt).toLocaleString("pl-PL", { timeZone: "Europe/Warsaw" })
+              : "24h";
+            const comment = [
+              `## 🌐 Remote Preview`,
+              ``,
+              ...urls.map((u) => `- ${u}`),
+              ``,
+              `⏱ **Dostępne do**: ${expiresFormatted}`,
+            ].join("\n");
+            await linearApi.addComment(linearConfig.apiKey, agent.linearIssueUuid, comment);
+          }
+        }
+      } catch (notifyErr) {
+        console.log(`[runtime] Remote preview notification failed: ${notifyErr}`);
+      }
+    }
+
     return runtimeId;
   } catch (error) {
     opLog.push(logEntry(`Fatal error: ${String(error)}`, false));
@@ -1063,7 +1138,7 @@ export async function checkRemoteStatus(projectName: string, branch: string): Pr
   const runtime = store.getRuntime(project.path, branch, "REMOTE");
   if (!runtime) throw new Error(`Runtime not found: REMOTE/${branch}`);
 
-  const cfg = store.getProjectConfig(project.path);
+  const rtenv = resolveRtenvConfig(project.path);
   const opLog = runtime.operationLog || [];
 
   const result: RemoteStatusResult = {
@@ -1074,11 +1149,11 @@ export async function checkRemoteStatus(projectName: string, branch: string): Pr
   };
 
   // Check Supabase
-  if (runtime.supabaseBranchId && cfg.SUPABASE_ACCESS_TOKEN) {
+  if (runtime.supabaseBranchId && rtenv.supabase?.accessToken) {
     try {
       const resp = await fetch(
         `https://api.supabase.com/v1/branches/${runtime.supabaseBranchId}`,
-        { headers: { Authorization: `Bearer ${cfg.SUPABASE_ACCESS_TOKEN}` } }
+        { headers: { Authorization: `Bearer ${rtenv.supabase.accessToken}` } }
       );
       const info = await resp.json();
       const status: string = info.status || "unknown";
@@ -1107,12 +1182,12 @@ export async function checkRemoteStatus(projectName: string, branch: string): Pr
 
   // Check Netlify
   const netlifyDeploys = runtime.netlifyDeployIds || [];
-  if (netlifyDeploys.length > 0 && cfg.NETLIFY_AUTH_TOKEN) {
+  if (netlifyDeploys.length > 0 && rtenv.netlify?.authToken) {
     for (const deploy of netlifyDeploys) {
       try {
         const resp = await fetch(
           `https://api.netlify.com/api/v1/deploys/${deploy.deployId}`,
-          { headers: { Authorization: `Bearer ${cfg.NETLIFY_AUTH_TOKEN}` } }
+          { headers: { Authorization: `Bearer ${rtenv.netlify.authToken}` } }
         );
         const info = await resp.json();
         const state = info.state || "unknown";
@@ -1169,7 +1244,6 @@ export async function stopRuntime(projectName: string, branch: string, type: sto
   const runtime = store.getRuntime(project.path, branch, type);
   if (!runtime) throw new Error(`Runtime not found: ${type}/${branch}`);
 
-  const cfg = store.getProjectConfig(project.path);
   const log: string[] = [];
 
   if (type === "LOCAL" && runtime.mode === "host") {
@@ -1206,12 +1280,13 @@ export async function stopRuntime(projectName: string, branch: string, type: sto
   }
 
   if (type === "REMOTE") {
-    if (runtime.supabaseBranchId && cfg.SUPABASE_ACCESS_TOKEN) {
+    const rtenv = resolveRtenvConfig(project.path);
+    if (runtime.supabaseBranchId && rtenv.supabase?.accessToken) {
       log.push(`Deleting Supabase branch ${runtime.supabaseBranchId}...`);
       try {
         const resp = await fetch(`https://api.supabase.com/v1/branches/${runtime.supabaseBranchId}`, {
           method: "DELETE",
-          headers: { Authorization: `Bearer ${cfg.SUPABASE_ACCESS_TOKEN}` },
+          headers: { Authorization: `Bearer ${rtenv.supabase.accessToken}` },
         });
         if (resp.ok) {
           log.push("Supabase branch deleted.");
@@ -1260,15 +1335,17 @@ export async function cleanupRuntime(projectName: string, branch: string, type: 
   // Just clean up the runtime record
 
   // Delete Supabase branch for REMOTE
-  const cfg = store.getProjectConfig(project.path);
-  if (type === "REMOTE" && runtime.supabaseBranchId && cfg.SUPABASE_ACCESS_TOKEN) {
-    try {
-      await fetch(`https://api.supabase.com/v1/branches/${runtime.supabaseBranchId}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${cfg.SUPABASE_ACCESS_TOKEN}` },
-      });
-    } catch {
-      // best effort
+  if (type === "REMOTE" && runtime.supabaseBranchId) {
+    const rtenv = resolveRtenvConfig(project.path);
+    if (rtenv.supabase?.accessToken) {
+      try {
+        await fetch(`https://api.supabase.com/v1/branches/${runtime.supabaseBranchId}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${rtenv.supabase.accessToken}` },
+        });
+      } catch {
+        // best effort
+      }
     }
   }
 

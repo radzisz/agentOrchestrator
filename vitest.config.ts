@@ -1,14 +1,15 @@
-import { defineConfig } from "vitest/config";
-import path from "path";
-
-export default defineConfig({
+export default {
   test: {
     globals: true,
     environment: "node",
+    include: [
+      "packages/*/src/**/__tests__/**/*.test.ts",
+      "apps/web/src/**/__tests__/**/*.test.ts",
+    ],
   },
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "src"),
+      "@": new URL("./apps/web/src", import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1"),
     },
   },
-});
+};

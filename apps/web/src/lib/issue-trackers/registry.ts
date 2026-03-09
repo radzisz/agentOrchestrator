@@ -6,8 +6,9 @@ import * as store from "@/lib/store";
 import type { IssueTracker, TrackerTypeSchema } from "./types";
 import { linearTracker } from "./linear-tracker";
 import { sentryTracker } from "./sentry-tracker";
+import { localTracker } from "./local-tracker";
 
-const ALL_TRACKERS: IssueTracker[] = [linearTracker, sentryTracker];
+const ALL_TRACKERS: IssueTracker[] = [localTracker, linearTracker, sentryTracker];
 
 /** Get all registered trackers. */
 export function getAllTrackers(): IssueTracker[] {
@@ -86,11 +87,29 @@ export function resolveTrackerConfig(
 /**
  * Get trackers that are configured and active for a given project.
  * Reads TRACKER_CONFIG from project, resolves instances, returns bound trackers.
+ * Local tracker is always included unless explicitly disabled.
  */
 export function getActiveTrackers(projectPath: string): IssueTracker[] {
   const trackerConfig = store.getProjectTrackerConfig(projectPath);
-  if (!trackerConfig) return [];
-  return getTrackersFromConfig(projectPath, trackerConfig);
+  const configured = trackerConfig ? getTrackersFromConfig(projectPath, trackerConfig) : [];
+
+  // Local tracker is always active unless explicitly disabled in project config
+  const localDisabled = trackerConfig?.trackers.some(
+    (e) => e.type === "local" && e.enabled === false,
+  );
+  if (!localDisabled && !configured.some((t) => t.name === "local")) {
+    configured.unshift(localTracker);
+  }
+
+  return configured;
+}
+
+/**
+ * Get trackers that can create issues for a project.
+ */
+export function getCreatableTrackers(projectPath: string): IssueTracker[] {
+  const active = getActiveTrackers(projectPath);
+  return active.filter((t) => t.canCreateIssue);
 }
 
 /** Resolve trackers from TRACKER_CONFIG */
@@ -102,6 +121,12 @@ function getTrackersFromConfig(projectPath: string, trackerConfig: store.Project
 
     const tracker = getTracker(entry.type);
     if (!tracker) continue;
+
+    // Local tracker needs no config/instance
+    if (entry.type === "local") {
+      active.push(tracker);
+      continue;
+    }
 
     const resolved = resolveTrackerConfig(projectPath, entry.type, entry.instanceId, entry.overrides);
     if (!resolved) continue;

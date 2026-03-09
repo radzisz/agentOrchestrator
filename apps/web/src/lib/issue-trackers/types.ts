@@ -130,9 +130,15 @@ export interface IssueTracker {
   readonly canManageLabels: boolean;
   hasLabel?(issue: TrackerIssue, label: string): boolean;
 
+  // Can this tracker create issues from the UI?
+  readonly canCreateIssue?: boolean;
+
   // For fetching a single issue (used by manual spawn API)
   getIssue?(externalId: string, projectPath: string): Promise<TrackerIssue | null>;
 
   // Reassign issue to creator when agent finishes (assignee mode)
   reassignOnDone?(issue: TrackerIssue, projectPath: string): Promise<void>;
+
+  // Create a new issue in the tracker
+  createIssue?(title: string, description: string, labels: string[], projectPath: string): Promise<{ externalId: string; identifier: string }>;
 }

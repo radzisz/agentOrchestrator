@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { appendFileSync, readFileSync } from "fs";
 import { join } from "path";
-import * as store from "@/lib/store";
-import * as cmd from "@/lib/cmd";
-
-const SRC = "gitignore";
+import * as gitSvc from "@/services/git";
+import { findAgentWithProject } from "@/lib/agent-aggregate/find-agent";
 
 export async function POST(
   req: NextRequest,
@@ -17,18 +15,12 @@ export async function POST(
     return NextResponse.json({ error: "No patterns provided" }, { status: 400 });
   }
 
-  const projects = store.listProjects();
-  let agent: store.AgentData | null = null;
-  for (const project of projects) {
-    agent = store.getAgent(project.path, id);
-    if (agent) break;
-  }
-
-  if (!agent || !agent.agentDir) {
+  const found = findAgentWithProject(id);
+  if (!found || !found.agent.agentDir) {
     return NextResponse.json({ error: "Agent or directory not found" }, { status: 404 });
   }
 
-  const dir = agent.agentDir;
+  const dir = found.agent.agentDir;
 
   try {
     // Append patterns to .gitignore
@@ -41,17 +33,11 @@ export async function POST(
       appendFileSync(gitignorePath, (existing.endsWith("\n") ? "" : "\n") + toAdd.join("\n") + "\n", "utf-8");
     }
 
-    // Stage .gitignore + commit + push
-    await cmd.git(`-C "${dir}" config user.email "agent@10timesdev.com"`, { source: SRC });
-    await cmd.git(`-C "${dir}" config user.name "10timesdev"`, { source: SRC });
-    await cmd.git(`-C "${dir}" add .gitignore`, { source: SRC });
-    const commitR = await cmd.git(`-C "${dir}" commit -m "chore: update .gitignore"`, { source: SRC });
-    if (!commitR.ok) {
-      return NextResponse.json({ error: commitR.stderr || "Commit failed" }, { status: 500 });
-    }
-    const pushR = await cmd.git(`-C "${dir}" push origin HEAD`, { source: SRC, timeout: 30000 });
-    if (!pushR.ok) {
-      return NextResponse.json({ error: pushR.stderr || "Push failed" }, { status: 500 });
+    const result = await gitSvc.commitAndPush(dir, "chore: update .gitignore", {
+      files: [".gitignore"],
+    });
+    if (!result.ok) {
+      return NextResponse.json({ error: result.error }, { status: 500 });
     }
 
     return NextResponse.json({ success: true });

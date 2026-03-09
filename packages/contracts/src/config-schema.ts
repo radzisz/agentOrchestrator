@@ -14,7 +14,7 @@ export interface ConfigField {
   visibleWhen?: { field: string; value: string };
 }
 
-export type ProviderCategory = "tracker" | "im" | "scm" | "ai";
+export type ProviderCategory = "tracker" | "im" | "scm" | "ai" | "rtenv";
 
 export interface ProviderTypeSchema {
   type: string;

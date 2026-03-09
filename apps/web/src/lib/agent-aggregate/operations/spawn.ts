@@ -7,7 +7,6 @@ import { join } from "path";
 import * as store from "@/lib/store";
 import * as cmd from "@/lib/cmd";
 import * as portManager from "@/services/port-manager";
-import { linearApi as linear } from "@orchestrator/tracker-linear";
 import { eventBus } from "@/lib/event-bus";
 import { resolveTrackerConfig } from "@/lib/issue-trackers/registry";
 import type { TrackerIssue } from "@/lib/issue-trackers/types";
@@ -17,6 +16,8 @@ import * as agentProcessOps from "./agent-process";
 import * as gitOps from "./git";
 import * as taskFiles from "./task-files";
 import { rewriteImageUrls } from "./task-files";
+import { writeRulesMd } from "./rule-resolver";
+import * as trackerOps from "./tracker";
 
 /** Spawn a new agent: clone → create container → start Claude process. */
 export async function spawnAgent(
@@ -30,39 +31,22 @@ export async function spawnAgent(
 ): Promise<void> {
   const agentDir = join(ctx.projectPath, ".10timesdev", "agents", ctx.issueId, "git");
 
-  // Resolve TrackerIssue — either provided directly or fetched from Linear
+  // Resolve TrackerIssue — either provided directly or fetched via tracker abstraction
   let trackerIssue = opts.trackerIssue;
   if (!trackerIssue && opts.linearIssueUuid) {
-    setProgress("fetching Linear issue");
-    const linearCfg = resolveTrackerConfig(ctx.projectPath, "linear");
-    if (!linearCfg?.apiKey) throw new Error("Linear API key not configured");
-    const linearIssue = await linear.getIssue(linearCfg.apiKey, opts.linearIssueUuid);
-    if (!linearIssue) throw new Error(`Issue ${ctx.issueId} not found in Linear`);
-    trackerIssue = {
-      externalId: linearIssue.id,
-      identifier: linearIssue.identifier,
-      title: linearIssue.title,
-      description: linearIssue.description,
-      priority: linearIssue.priority,
-      phase: "todo",
-      rawState: linearIssue.state.name,
-      labels: linearIssue.labels.nodes.map((l: any) => l.name),
-      createdBy: linearIssue.creator?.name ?? null,
-      createdAt: linearIssue.createdAt ?? null,
-      url: linearIssue.url || null,
-      source: "linear",
-      comments: (linearIssue.comments?.nodes || [])
-        .filter((c: any) => !c.user.isMe)
-        .map((c: any) => ({
-          body: c.body,
-          createdAt: c.createdAt,
-          authorName: c.user.name,
-          isBot: false,
-        })),
-      _raw: linearIssue,
-    };
+    setProgress("fetching tracker issue");
+    trackerIssue = await trackerOps.fetchIssue("linear", opts.linearIssueUuid, ctx.projectPath) ?? undefined;
+    if (!trackerIssue) throw new Error(`Issue ${ctx.issueId} not found in tracker`);
   }
   if (!trackerIssue) throw new Error("Either trackerIssue or linearIssueUuid is required");
+
+  // Guard: project must be a git repository
+  if (!existsSync(join(ctx.projectPath, ".git"))) {
+    throw new Error(
+      `Project path "${ctx.projectPath}" is not a git repository. ` +
+      `Initialize git first (git init) before spawning agents.`,
+    );
+  }
 
   // Update agent record
   ctx.agent.title = trackerIssue.title;
@@ -89,7 +73,7 @@ export async function spawnAgent(
   store.cacheAgent(ctx.projectPath, ctx.issueId, ctx.agent);
 
   try {
-    // Clone repo
+    // Always full clone — agent needs remote to push, rebase, resolve conflicts
     setProgress("cloning repository");
     await gitOps.cloneRepo(ctx.agent, ctx.projectPath, ctx.state);
     ctx.persist();
@@ -108,8 +92,10 @@ export async function spawnAgent(
       await cmd.run("npm ci", { cwd: agentDir, source: "agent-aggregate", timeout: 120000 });
     }
 
-    // Ensure orchestrator files are git-ignored
+    // Create agent branch, add gitignore entries, and commit
+    setProgress("setting up branch");
     taskFiles.ensureGitIgnored(agentDir, [".10timesdev", "agent-output.log", ".agent-container", "messages.jsonl"]);
+    await gitOps.setupAgentBranch(agentDir, ctx.agent.branch || `agent/${ctx.issueId}`);
 
     // Migrate legacy orchestrator files
     const tenxDir = join(agentDir, ".10timesdev");
@@ -118,9 +104,16 @@ export async function spawnAgent(
     // Write TASK.md (downloads images) and CLAUDE.md
     setProgress("writing task files");
     const linearCfgForImages = resolveTrackerConfig(ctx.projectPath, "linear");
-    await taskFiles.writeTaskMd(agentDir, trackerIssue, { linearApiKey: linearCfgForImages?.apiKey });
+    await taskFiles.writeTaskMd(agentDir, trackerIssue, { linearApiKey: linearCfgForImages?.apiKey, projectPath: ctx.projectPath });
     const defaultBranch = await ctx.getDefaultBranch();
-    taskFiles.writeClaudeMd(ctx, agentDir, ports, defaultBranch);
+
+    // Write AI rules (RULES.md) and CLAUDE.md
+    const globalRules = store.getAIRules();
+    const projectConfig = store.getProjectConfig(ctx.projectPath);
+    const projectRules: import("@/lib/store").AIRule[] = JSON.parse(projectConfig.AI_RULES || "[]");
+    const hasRules = writeRulesMd(agentDir, [...globalRules, ...projectRules]);
+
+    taskFiles.writeClaudeMd(ctx, agentDir, defaultBranch, hasRules);
 
     // Log initial message (skip if retrying — messages already exist)
     const existingMessages = store.getMessages(ctx.projectPath, ctx.issueId);
@@ -148,7 +141,7 @@ export async function spawnAgent(
     // Launch agent
     setProgress("launching agent");
     const prompt = opts.customPrompt ||
-      "Read .10timesdev/TASK.md — this is your task. Read .10timesdev/CLAUDE.md — it contains your ports, identity, and rules. Complete the task. When done, follow the instructions in CLAUDE_GLOBAL.md.";
+      "Read .10timesdev/TASK.md — this is your task. Read .10timesdev/CLAUDE.md — it contains your identity, rules, allowed git operations, and response format. Complete the task. When done, output the JSON response as described in CLAUDE.md.";
     await agentProcessOps.startAgentProcess(ctx.agent, ctx.projectPath, ctx.state, prompt, ctx.makeOnExitedCallback());
 
     ctx.state.lifecycle = "active";
@@ -198,6 +191,14 @@ export async function restoreAgent(
 
   const agentDir = join(ctx.projectPath, ".10timesdev", "agents", ctx.issueId, "git");
 
+  // Guard: project must be a git repository
+  if (!existsSync(join(ctx.projectPath, ".git"))) {
+    throw new Error(
+      `Project path "${ctx.projectPath}" is not a git repository. ` +
+      `Initialize git first (git init) before restoring agents.`,
+    );
+  }
+
   // Reset state
   ctx.state.lifecycle = "spawning";
   ctx.state.container = "missing";
@@ -246,8 +247,9 @@ export async function restoreAgent(
       await cmd.run("npm ci", { cwd: agentDir, source: "agent-aggregate", timeout: 120000 });
     }
 
-    // Ensure orchestrator files are git-ignored
+    // Ensure orchestrator files are git-ignored and committed on agent branch
     taskFiles.ensureGitIgnored(agentDir, [".10timesdev", "agent-output.log", ".agent-container", "messages.jsonl"]);
+    await gitOps.commitGitIgnoreIfNeeded(agentDir);
 
     // Write task & claude files
     setProgress("writing task files");
@@ -260,26 +262,19 @@ export async function restoreAgent(
       writeFileSync(taskMdPath, `# ${ctx.issueId}: ${ctx.agent.title || "Task"}\n\n${ctx.agent.description || ""}\n`, "utf-8");
     }
     const restoreDefaultBranch = await ctx.getDefaultBranch();
-    taskFiles.writeClaudeMd(ctx, agentDir, ports, restoreDefaultBranch);
 
-    // Update Linear status if requested
-    if (opts.setInProgress && ctx.agent.linearIssueUuid) {
-      const linearCfg = resolveTrackerConfig(ctx.projectPath, "linear");
-      if (linearCfg?.apiKey) {
-        setProgress("updating Linear status");
-        try {
-          const inProgressId = await linear.getWorkflowStateId(
-            linearCfg.apiKey,
-            linearCfg.teamKey,
-            "In Progress",
-          );
-          if (inProgressId) {
-            await linear.updateIssueState(linearCfg.apiKey, ctx.agent.linearIssueUuid, inProgressId);
-          }
-        } catch {
-          // best effort
-        }
-      }
+    // Write AI rules (RULES.md) and CLAUDE.md
+    const restoreGlobalRules = store.getAIRules();
+    const restoreProjectConfig = store.getProjectConfig(ctx.projectPath);
+    const restoreProjectRules: import("@/lib/store").AIRule[] = JSON.parse(restoreProjectConfig.AI_RULES || "[]");
+    const restoreHasRules = writeRulesMd(agentDir, [...restoreGlobalRules, ...restoreProjectRules]);
+
+    taskFiles.writeClaudeMd(ctx, agentDir, restoreDefaultBranch, restoreHasRules);
+
+    // Update tracker status if requested — use abstraction
+    if (opts.setInProgress && (ctx.agent.trackerExternalId || ctx.agent.linearIssueUuid)) {
+      setProgress("updating tracker status");
+      await trackerOps.transitionTo(ctx.agent, ctx.projectPath, "in_progress");
     }
 
     // Create container
@@ -288,7 +283,7 @@ export async function restoreAgent(
 
     // Launch Claude
     setProgress("launching agent");
-    const prompt = "Read .10timesdev/TASK.md and .10timesdev/CLAUDE.md. Continue working on the task. When done, comment on Linear.";
+    const prompt = "Read .10timesdev/TASK.md and .10timesdev/CLAUDE.md. Continue working on the task. When done, output the JSON response as described in CLAUDE.md.";
     await agentProcessOps.startAgentProcess(ctx.agent, ctx.projectPath, ctx.state, prompt, ctx.makeOnExitedCallback());
 
     ctx.state.lifecycle = "active";

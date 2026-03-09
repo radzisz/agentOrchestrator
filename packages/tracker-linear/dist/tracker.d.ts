@@ -19,5 +19,9 @@ export declare class LinearTracker extends BaseTracker {
     hasLabel(issue: TrackerIssue, label: string): boolean;
     reassignOnDone(config: Record<string, string>, issue: TrackerIssue): Promise<void>;
     getIssue(config: Record<string, string>, externalId: string): Promise<TrackerIssue | null>;
+    createIssue(config: Record<string, string>, title: string, description: string, labels: string[]): Promise<{
+        externalId: string;
+        identifier: string;
+    }>;
 }
 //# sourceMappingURL=tracker.d.ts.map

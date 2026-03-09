@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { existsSync } from "fs";
-import { simpleGit } from "@/lib/cmd";
 import * as store from "@/lib/store";
+import * as gitSvc from "@/services/git";
 
 export async function POST(
   req: NextRequest,
@@ -28,24 +28,16 @@ export async function POST(
   }
 
   try {
-    const git = simpleGit(project.path);
-
-    // Fetch latest from remote
-    await git.fetch("origin");
-
-    // Create local tracking branch
-    await git.checkout(["-B", branch, `origin/${branch}`]);
-
-    // Switch back to the default branch so the main repo isn't left on an agent branch
-    let defaultBranch = "main";
-    try {
-      const head = await git.raw(["symbolic-ref", "refs/remotes/origin/HEAD"]);
-      defaultBranch = head.trim().replace("refs/remotes/origin/", "");
-    } catch {
-      // fallback
+    const result = await gitSvc.fetchAndCheckout(project.path, branch);
+    if (!result.ok) {
+      return NextResponse.json(
+        { error: `Failed to checkout: ${result.error}` },
+        { status: 500 }
+      );
     }
 
-    await git.checkout(defaultBranch);
+    // Switch back to the default branch so the main repo isn't left on an agent branch
+    await gitSvc.checkoutDefault(project.path);
 
     return NextResponse.json({ ok: true, branch });
   } catch (err) {

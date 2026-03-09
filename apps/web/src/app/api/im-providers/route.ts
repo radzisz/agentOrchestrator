@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as store from "@/lib/store";
+import { reloadInstances } from "@/lib/im-config";
 
 export async function GET() {
   const instances = store.getIMProviderInstances();
@@ -19,17 +20,19 @@ export async function POST(req: NextRequest) {
     type,
     name,
     isDefault: false,  // saveIMProviderInstance will set true if first
+    enabled: true,
     config: config || {},
   };
 
   store.saveIMProviderInstance(instance);
+  reloadInstances();
 
   return NextResponse.json(instance, { status: 201 });
 }
 
 export async function PUT(req: NextRequest) {
   const body = await req.json();
-  const { id, name, type, config, isDefault } = body;
+  const { id, name, type, config, isDefault, enabled } = body;
 
   if (!id) {
     return NextResponse.json({ error: "id is required" }, { status: 400 });
@@ -44,8 +47,10 @@ export async function PUT(req: NextRequest) {
   if (type !== undefined) existing.type = type;
   if (config !== undefined) existing.config = { ...existing.config, ...config };
   if (isDefault !== undefined) existing.isDefault = isDefault;
+  if (enabled !== undefined) existing.enabled = enabled;
 
   store.saveIMProviderInstance(existing);
+  reloadInstances();
 
   return NextResponse.json(existing);
 }
@@ -64,6 +69,7 @@ export async function DELETE(req: NextRequest) {
   }
 
   store.deleteIMProviderInstance(id);
+  reloadInstances();
 
   return NextResponse.json({ ok: true });
 }

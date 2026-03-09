@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, FolderKanban, Plug } from "lucide-react";
+import { LayoutDashboard, FolderKanban, Plug, CircleDot, ScrollText } from "lucide-react";
 import { Logo } from "@/components/logo";
 import {
   Sidebar,
@@ -19,6 +19,8 @@ import {
 const navItems = [
   { title: "Dashboard", href: "/", icon: LayoutDashboard },
   { title: "Projects", href: "/projects", icon: FolderKanban },
+  { title: "Issues", href: "/issues", icon: CircleDot },
+  { title: "AI Rules", href: "/ai-rules", icon: ScrollText },
   { title: "Integrations", href: "/integrations", icon: Plug },
 ];
 

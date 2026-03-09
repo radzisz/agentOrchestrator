@@ -16,6 +16,10 @@ export { BaseSCMProvider } from "./scm-provider";
 export type { AIProviderDriver } from "./ai-provider";
 export { BaseAIProvider } from "./ai-provider";
 
+// Runtime Environment
+export { BaseRuntimeEnv } from "./runtime-env";
+export type { RtenvProvisionResult, RtenvStatusResult } from "./runtime-env";
+
 // UI
 export type { SystemConfigPanelProps, ProjectConfigPanelProps } from "./ui";
 

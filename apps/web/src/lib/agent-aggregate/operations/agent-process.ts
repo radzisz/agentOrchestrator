@@ -14,6 +14,24 @@ import { resolveProviderConfig, resolveProviderInstance, getProviderDriver } fro
 import type { AIProviderDriver } from "../ai-provider";
 import { resolveTrackerConfig } from "@/lib/issue-trackers/registry";
 
+/**
+ * Append agent message only if it's not a duplicate of the last agent message.
+ * Prevents double-writes from onExit + reattach poll + recoverAgentOutput racing.
+ */
+function appendAgentMessageDedup(projectPath: string, issueId: string, text: string): void {
+  if (!text.trim()) return;
+  const messages = store.getMessages(projectPath, issueId);
+  const lastAgent = messages.filter(m => m.role === "agent").pop();
+  if (lastAgent) {
+    // Check prefix match (messages may differ slightly in trailing whitespace/lines)
+    const prefix = text.slice(0, 80);
+    if (lastAgent.text.startsWith(prefix) || text.startsWith(lastAgent.text.slice(0, 80))) {
+      return; // duplicate — skip
+    }
+  }
+  store.appendMessage(projectPath, issueId, "agent", text);
+}
+
 /** Ring buffer for live Claude output per agent (last N lines, kept in memory). */
 const liveOutputBuffers = new Map<string, string[]>();
 const LIVE_OUTPUT_MAX_LINES = 50;
@@ -39,6 +57,15 @@ function appendLiveOutput(issueId: string, chunk: string): void {
 
 function clearLiveOutput(issueId: string): void {
   liveOutputBuffers.delete(issueId);
+}
+
+/** Kill orphaned tail/sleep processes left behind by previous reattachOutput calls. */
+async function killOrphanedTailProcesses(containerName: string): Promise<void> {
+  await cmd.dockerExec(
+    containerName,
+    `pkill -f 'tail -n 20 -f /tmp/claude-output' || true; pkill -f 'sleep 86400' || true`,
+    { source: "cleanup-tail", timeout: 5_000, user: "root" },
+  ).catch(() => {});
 }
 
 /** Track active exec per agent to prevent stale onExit from overwriting status */
@@ -129,7 +156,8 @@ export function reattachOutput(agent: store.AgentData, projectPath?: string, onA
   const pollInterval = setInterval(async () => {
     try {
       if (activeExecIds.get(issueId) !== execId) {
-        // Another exec took over (e.g. new wake)
+        // Another exec took over (e.g. new wake) — host-side kill only,
+        // container-side tail cleanup happens in startAgentProcess
         clearInterval(pollInterval);
         child.kill();
         return;
@@ -143,6 +171,8 @@ export function reattachOutput(agent: store.AgentData, projectPath?: string, onA
       if (!stillRunning) {
         clearInterval(pollInterval);
         child.kill();
+        // Kill the tail process inside the container (child.kill only kills host-side docker exec)
+        killOrphanedTailProcesses(containerName).catch(() => {});
 
         if (activeExecIds.get(issueId) !== execId) return;
         activeExecIds.delete(issueId);
@@ -154,7 +184,7 @@ export function reattachOutput(agent: store.AgentData, projectPath?: string, onA
         const agentResponse = driver.filterOutput(output);
         if (agentResponse && projectPath) {
           const tail = agentResponse.split("\n").slice(-50).join("\n");
-          store.appendMessage(projectPath, issueId, "agent", tail);
+          appendAgentMessageDedup(projectPath, issueId, tail);
         }
 
         // Notify aggregate via injected callback (preferred path)
@@ -199,8 +229,9 @@ export async function startAgentProcess(
   const driver = resolveDriver(agent, projectPath);
   const providerInstance = resolveProviderInstance(agent, cfg);
 
-  // Kill any running agent process before starting new one
+  // Kill any running agent process + orphaned tail/sleep from reattach before starting new one
   await killProcesses(agent.containerName, driver.processPattern);
+  await killOrphanedTailProcesses(agent.containerName);
 
   clearLiveOutput(agent.issueId);
   const launchCmd = driver.buildLaunchCommand(prompt);
@@ -228,7 +259,7 @@ export async function startAgentProcess(
       const agentResponse = driver.filterOutput(output?.trim() || "");
       if (agentResponse) {
         const tail = agentResponse.split("\n").slice(-50).join("\n");
-        store.appendMessage(projectPath, agent.issueId, "agent", tail);
+        appendAgentMessageDedup(projectPath, agent.issueId, tail);
       }
 
       // Touch changed files to trigger HMR

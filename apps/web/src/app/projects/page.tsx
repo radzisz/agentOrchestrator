@@ -1,16 +1,39 @@
+import { existsSync } from "fs";
+import { join } from "path";
 import * as store from "@/lib/store";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { ProjectForm } from "./project-form";
 import { ScanProjects } from "./scan-projects";
 import { getBasePath } from "@/integrations/local-drive";
+import { ProjectList } from "./project-list";
 
 export const dynamic = "force-dynamic";
 
 export default async function ProjectsPage() {
   const projects = store.listProjects();
   const basePath = await getBasePath();
+
+  const projectsData = projects.map((project) => {
+    const agents = store.listAgents(project.path);
+    const cfg = store.getProjectConfig(project.path);
+
+    // Visible agents = not closed (matches what the project detail page shows)
+    const visible = agents.filter((a) => a.uiStatus?.status !== "closed");
+    const running = visible.filter((a) => a.uiStatus?.status === "running").length;
+    const awaiting = visible.filter((a) => a.uiStatus?.status === "awaiting").length;
+    const active = visible.length;
+    const total = agents.length;
+
+    return {
+      name: project.name,
+      path: project.path,
+      repoUrl: cfg.REPO_URL || null,
+      hasGit: existsSync(join(project.path, ".git")),
+      running,
+      active,
+      awaiting,
+      total,
+    };
+  });
 
   return (
     <div>
@@ -20,37 +43,7 @@ export default async function ProjectsPage() {
       </div>
 
       <div className="p-6 space-y-6">
-        <div className="grid grid-cols-2 gap-4">
-          {projects.map((project) => {
-            const agents = store.listAgents(project.path);
-            const activeCount = agents.filter((a) => !["DONE", "CANCELLED"].includes(a.status)).length;
-            return (
-              <Card key={project.name}>
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <CardTitle>
-                      <a href={`/projects/${project.name}`} className="hover:underline">
-                        {project.name}
-                      </a>
-                    </CardTitle>
-                    <Badge variant="secondary">{activeCount} active</Badge>
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-sm text-muted-foreground space-y-1">
-                    <p>Total agents: {agents.length}</p>
-                  </div>
-                  <div className="mt-3">
-                    <Button variant="outline" size="sm" asChild>
-                      <a href={`/projects/${project.name}`}>View</a>
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
-
+        <ProjectList projects={projectsData} />
         {projects.length === 0 && <ScanProjects basePath={basePath} />}
       </div>
     </div>

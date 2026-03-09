@@ -1,5 +1,5 @@
 import * as store from "@/lib/store";
-import { AgentCard } from "@/components/agent-card";
+import { DashboardAgents } from "@/components/dashboard-agents";
 import { RealTimeFeed } from "@/components/real-time-feed";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -22,6 +22,15 @@ export default async function Dashboard() {
   allAgents.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 
   const runningCount = allAgents.filter((a) => a.uiStatus?.status === "running").length;
+
+  // Agents requiring attention: awaiting (error/conflict/decision) or stopped but active
+  const needsAttention = allAgents.filter((a) => {
+    const ui = a.uiStatus?.status;
+    if (ui === "awaiting") return true;
+    // Stopped agent with active lifecycle = exited, needs human action
+    if (a.state?.agent === "stopped" && a.state?.lifecycle === "active" && ui !== "closed") return true;
+    return false;
+  });
 
   // Count occupied port slots
   let portCount = 0;
@@ -78,22 +87,13 @@ export default async function Dashboard() {
         </div>
 
         <div className="grid grid-cols-3 gap-6">
-          {/* Agent Grid */}
-          <div className="col-span-2 space-y-4">
-            <h2 className="text-lg font-semibold">Active Agents</h2>
-            {allAgents.length === 0 ? (
-              <p className="text-muted-foreground text-sm">No active agents</p>
-            ) : (
-              <div className="grid grid-cols-2 gap-4">
-                {allAgents.map((agent) => (
-                  <AgentCard key={`${agent.projectName}/${agent.issueId}`} agent={agent} />
-                ))}
-              </div>
-            )}
+          {/* Requires Attention */}
+          <div className="col-span-2">
+            <DashboardAgents agents={needsAttention} />
           </div>
 
           {/* Real-time Feed */}
-          <div className="space-y-4">
+          <div className="space-y-3">
             <h2 className="text-lg font-semibold">Activity Feed</h2>
             <RealTimeFeed />
           </div>

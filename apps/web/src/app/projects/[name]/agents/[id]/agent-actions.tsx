@@ -212,11 +212,11 @@ export function AgentActions({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: "Commit all uncommitted changes now. Use a descriptive commit message. Then push to origin.",
+          message: "Commit all your uncommitted changes now. Use a descriptive commit message. Do not start any new work. Output the JSON response as described in CLAUDE.md.",
         }),
       });
       setOpenDialog(null);
-      window.location.reload();
+      window.dispatchEvent(new Event("show-chat"));
     } finally {
       setActionLoading(false);
     }

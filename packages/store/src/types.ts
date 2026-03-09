@@ -28,7 +28,7 @@ export interface ProjectTrackerConfig {
 
 export interface AIProviderInstance {
   id: string;
-  type: "claude-code" | "aider";
+  type: "claude-code" | "aider" | "gemini";
   name: string;
   isDefault: boolean;
   config: Record<string, string>;

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface FeedEvent {
+  id: number;
   type: string;
   data: any;
   timestamp: string;
@@ -10,29 +11,32 @@ interface FeedEvent {
 
 export function RealTimeFeed() {
   const [events, setEvents] = useState<FeedEvent[]>([]);
-  const [connected, setConnected] = useState(false);
+  const lastIdRef = useRef(0);
 
   useEffect(() => {
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    let active = true;
 
-    ws.onopen = () => setConnected(true);
-    ws.onclose = () => {
-      setConnected(false);
-      // Reconnect after 3s
-      setTimeout(() => {
-        window.location.reload();
-      }, 3000);
-    };
-
-    ws.onmessage = (event) => {
+    async function poll() {
       try {
-        const data = JSON.parse(event.data);
-        setEvents((prev) => [data, ...prev].slice(0, 50));
-      } catch {}
-    };
+        const resp = await fetch(`/api/feed?after=${lastIdRef.current}`);
+        if (!resp.ok || !active) return;
+        const data: FeedEvent[] = await resp.json();
+        if (data.length > 0) {
+          // data comes newest-first; the highest id is data[0]
+          lastIdRef.current = data[0].id;
+          setEvents((prev) => [...data, ...prev].slice(0, 50));
+        }
+      } catch {
+        // silent
+      }
+    }
 
-    return () => ws.close();
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
   }, []);
 
   const eventIcon: Record<string, string> = {
@@ -49,22 +53,13 @@ export function RealTimeFeed() {
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2 text-sm">
-        <span
-          className={`w-2 h-2 rounded-full ${connected ? "bg-green-500" : "bg-red-500"}`}
-        />
-        <span className="text-muted-foreground">
-          {connected ? "Connected" : "Disconnected"}
-        </span>
-      </div>
-
       <div className="space-y-1 max-h-[400px] overflow-auto">
         {events.length === 0 && (
           <p className="text-sm text-muted-foreground">No events yet...</p>
         )}
-        {events.map((event, i) => (
+        {events.map((event) => (
           <div
-            key={i}
+            key={event.id}
             className="text-sm p-2 rounded bg-muted/50 flex items-start gap-2"
           >
             <span>{eventIcon[event.type] || "📌"}</span>

@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { existsSync } from "fs";
 import * as store from "@/lib/store";
 import * as cmd from "@/lib/cmd";
+import * as gitSvc from "@/services/git";
 import { findAggregate } from "@/lib/agent-aggregate";
+import { reconcileAllRuntimes } from "@/services/runtime-reconcile";
 
 const SRC = "local-branches";
 
@@ -24,13 +26,7 @@ export async function GET(
   }
 
   // Default branch
-  const headRef = await cmd.git(
-    `-C "${project.path}" symbolic-ref refs/remotes/origin/HEAD`,
-    { source: SRC, timeout: 5000 },
-  );
-  const defaultBranch = headRef.ok
-    ? headRef.stdout.replace("refs/remotes/origin/", "")
-    : "main";
+  const defaultBranch = await gitSvc.getDefaultBranch(project.path);
 
   const agents = store.listAgents(project.path);
   const runtimes = store.listRuntimes(project.path);
@@ -50,32 +46,12 @@ export async function GET(
   const runningContainers = await cmd.getRunningContainers({ source: SRC });
 
   // Reconcile runtime statuses — if container is dead, clear stuck states
-  for (const rt of runtimes) {
-    if (rt.type !== "LOCAL") continue;
-    if (!rt.containerName || rt.mode === "host") continue;
-    const alive = runningContainers.has(rt.containerName);
-    if (!alive) {
-      let dirty = false;
-      if (rt.status === "RUNNING" || rt.status === "STARTING") {
-        rt.status = "STOPPED";
-        dirty = true;
-      }
-      if (rt.servicesEnabled) {
-        rt.servicesEnabled = false;
-        dirty = true;
-      }
-      if (dirty) {
-        rt.updatedAt = new Date().toISOString();
-        store.saveRuntime(project.path, rt.branch, rt.type, rt);
-      }
-    }
-  }
+  reconcileAllRuntimes(project.path, runtimes, runningContainers);
 
   const enriched = await Promise.all(
     agents
-      .filter((agent) => agent.agentDir)
       .map(async (agent) => {
-        const dir = agent.agentDir!;
+        const dir = agent.agentDir || null;
         const branchName = agent.branch || `agent/${agent.issueId}`;
 
         const containerRunning = agent.containerName ? runningContainers.has(agent.containerName) : false;
@@ -92,7 +68,7 @@ export async function GET(
         const merged = gitState?.merged ?? false;
 
         // Fallback: if aggregate has no git info, try git directly
-        if (!gitState?.lastCommit && existsSync(`${dir}/.git`) && !TERMINAL.has(agent.status)) {
+        if (dir && !gitState?.lastCommit && existsSync(`${dir}/.git`) && !TERMINAL.has(agent.status)) {
           const logR = await cmd.git(
             `-C "${dir}" log -1 --format="%H|%s|%an|%ci"`,
             { source: SRC, timeout: 5000 });
@@ -105,14 +81,10 @@ export async function GET(
           }
           // Skip ahead/behind from shallow clone if aggregate already knows merged
           if (!merged) {
-            const countR = await cmd.git(
-              `-C "${dir}" rev-list --left-right --count "origin/${defaultBranch}...HEAD"`,
-              { source: SRC, timeout: 5000 });
-            if (countR.ok && countR.stdout) {
-              const [behind, ahead] = countR.stdout.split(/\s+/).map(Number);
-              aheadBy = ahead || 0;
-              behindBy = behind || 0;
-            }
+            const { ref: baseRef } = await gitSvc.getBaseRef(dir);
+            const lr = await gitSvc.getLeftRight(dir, baseRef);
+            aheadBy = lr.ahead;
+            behindBy = lr.behind;
           }
         }
 
