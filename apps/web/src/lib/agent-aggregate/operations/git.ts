@@ -2,9 +2,8 @@
 // Git operations — extracted from rebase/route.ts, merge.ts, agent-lifecycle.ts
 // ---------------------------------------------------------------------------
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, readdirSync, lstatSync, statSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, appendFileSync, readdirSync, rmSync } from "fs";
 import { join, dirname } from "path";
-import { rmSync } from "fs";
 import * as cmd from "@/lib/cmd";
 import { simpleGit } from "@/lib/cmd";
 import * as store from "@/lib/store";
@@ -12,6 +11,22 @@ import * as gitSvc from "@/services/git";
 import * as portManager from "@/services/port-manager";
 import { eventBus } from "@/lib/event-bus";
 import type { AgentState, CurrentOperation } from "../types";
+
+// Files managed by orchestrator — ignored in dirty checks, auto-committed before merge
+const MANAGED_PATHS = new Set([".gitignore", ".config/"]);
+const MANAGED_PREFIXES = [".10timesdev/", ".10timesdev\\", ".config/", ".config\\"];
+// Lock/env files that don't count as meaningful changes
+const NOISE_PATHS = new Set(["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".env"]);
+
+/** Check if a file path is orchestrator-managed or noise (not meaningful). */
+function isIgnoredPath(filePath: string): boolean {
+  return NOISE_PATHS.has(filePath) || MANAGED_PREFIXES.some(p => filePath.startsWith(p));
+}
+
+/** Check if a file is orchestrator-managed (eligible for auto-commit). */
+function isManagedPath(filePath: string): boolean {
+  return MANAGED_PATHS.has(filePath) || MANAGED_PREFIXES.some(p => filePath.startsWith(p));
+}
 
 /** Check git status inside agent directory. Returns detected git state. */
 export async function checkGit(
@@ -61,11 +76,7 @@ export async function checkGit(
       // Ignore filemode changes, lock files, and orchestrator-managed files
       await git.raw(["config", "core.fileMode", "false"]).catch(() => {});
       const statusResult = await git.status();
-      const ignorePaths = new Set(["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".env"]);
-      const ignorePrefixes = [".10timesdev/", ".10timesdev\\"];
-      const meaningfulChanges = statusResult.files.filter(f =>
-        !ignorePaths.has(f.path) && !ignorePrefixes.some(p => f.path.startsWith(p))
-      );
+      const meaningfulChanges = statusResult.files.filter(f => !isIgnoredPath(f.path));
       result.dirty = meaningfulChanges.length > 0;
 
       const { ref: baseRef } = await gitSvc.getBaseRef(agent.agentDir!);
@@ -156,11 +167,7 @@ async function checkGitInContainer(
     const statusR = await cmd.dockerExec(containerName, "git -c core.fileMode=false status --porcelain", { source: src, timeout });
     if (statusR.ok) {
       const lines = statusR.stdout.trim().split("\n").filter(l => l.trim());
-      const ignorePaths = new Set(["package-lock.json", "pnpm-lock.yaml", "yarn.lock", ".env"]);
-      const meaningful = lines.filter(l => {
-        const file = l.slice(3).trim();
-        return !ignorePaths.has(file) && !file.startsWith(".10timesdev/") && !file.startsWith(".10timesdev\\");
-      });
+      const meaningful = lines.filter(l => !isIgnoredPath(l.slice(3).trim()));
       result.dirty = meaningful.length > 0;
     }
 
@@ -209,11 +216,17 @@ export async function cloneRepo(
   // Ensure parent directory exists (agentRoot for new git/ structure, or agents/ for legacy)
   mkdirSync(dirname(agentDir), { recursive: true });
 
-  let cloneUrl = cfg.REPO_URL || await simpleGit(projectPath).remote(["get-url", "origin"]) as unknown as string;
-  if (typeof cloneUrl === "string") cloneUrl = cloneUrl.trim();
-  // Token: per-project first, then global default repo provider
+  // Resolve clone URL: explicit config > git remote > local clone
+  let cloneUrl: string | null = cfg.REPO_URL || null;
+  if (!cloneUrl) {
+    try {
+      const url = await simpleGit(projectPath).remote(["get-url", "origin"]) as unknown as string;
+      if (typeof url === "string" && url.trim()) cloneUrl = url.trim();
+    } catch { /* no remote */ }
+  }
+
   const githubToken = cfg.GITHUB_TOKEN || store.getDefaultRepoProviderInstance()?.config?.token;
-  if (githubToken && cloneUrl.startsWith("https://github.com/")) {
+  if (cloneUrl && githubToken && cloneUrl.startsWith("https://github.com/")) {
     cloneUrl = cloneUrl.replace(
       "https://github.com",
       `https://x-access-token:${githubToken}@github.com`
@@ -222,46 +235,37 @@ export async function cloneRepo(
 
   if (existsSync(agentDir)) rmSync(agentDir, { recursive: true, force: true });
 
-  await simpleGit().clone(cloneUrl, agentDir, ["--depth", "50"]);
+  if (cloneUrl) {
+    // Clone from remote
+    await simpleGit().clone(cloneUrl, agentDir, ["--depth", "50"]);
+  } else {
+    // No remote — clone from local project dir
+    await simpleGit().clone(projectPath, agentDir);
+  }
 
   const agentGit = simpleGit(agentDir);
   await agentGit.addConfig("credential.helper", "");
   await agentGit.addConfig("core.autocrlf", "input");
   await agentGit.addConfig("core.filemode", "false");
 
-  // Shallow clone only tracks the default branch — widen refspec so fetch/rev-list
-  // can resolve origin/agent/* and other branches.
-  await agentGit.addConfig("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*", false);
+  // Widen refspec so fetch/rev-list can resolve all remote branches.
+  try {
+    await agentGit.addConfig("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*", false);
+  } catch { /* local clone may not have origin */ }
 
-  if (githubToken && cloneUrl.includes("x-access-token")) {
+  if (cloneUrl && githubToken && cloneUrl.includes("x-access-token")) {
     await agentGit.remote(["set-url", "origin", cloneUrl]);
   }
 
   state.git.branch = agent.branch || `agent/${agent.issueId}`;
 }
 
-/** Remove the agent's repo directory.
- *  Detects worktrees (.git is a file) and uses `git worktree remove` for clean cleanup.
- *  With new git/ structure, metadata at {agentRoot}/.10timesdev/ is untouched.
- *  With legacy structure (agentDir === agentRoot), falls back to selective cleanup. */
+/** Remove the agent's repo directory. */
 export async function removeRepo(
   agent: store.AgentData,
   projectPath?: string,
 ): Promise<void> {
   if (!agent.agentDir || !existsSync(agent.agentDir)) return;
-
-  // Detect worktree: .git is a file containing "gitdir: ..."
-  const dotGit = join(agent.agentDir, ".git");
-  if (projectPath && existsSync(dotGit)) {
-    try {
-      const stat = lstatSync(dotGit);
-      if (stat.isFile()) {
-        await removeWorktree(agent, projectPath);
-        return;
-      }
-    } catch {}
-  }
-
   try { rmSync(agent.agentDir, { recursive: true, force: true }); } catch {}
 }
 
@@ -409,7 +413,38 @@ export async function rebaseRepo(
   }
 }
 
-/** Merge agent branch into default branch. */
+/** Push agent branch to the project repo.
+ *  If the clone has origin → push there.
+ *  If not → fetch from agent dir into project repo. */
+export async function pushBranchToRemote(
+  agent: store.AgentData,
+  projectPath: string,
+): Promise<boolean> {
+  if (!agent.branch || !agent.agentDir) return false;
+  if (!existsSync(join(agent.agentDir, ".git"))) return false;
+
+  const hasOrigin = await gitSvc.hasOrigin(agent.agentDir).catch(() => false);
+
+  if (hasOrigin) {
+    const agentGit = simpleGit(agent.agentDir);
+    await agentGit.push("origin", agent.branch, ["--force"]);
+    return true;
+  }
+
+  // No remote — fetch agent branch into project repo from agent dir
+  // Clean up any stale worktree registrations that block the fetch
+  const projectGit = simpleGit(projectPath);
+  try { await projectGit.raw(["worktree", "prune"]); } catch {}
+  const wtDir = join(projectPath, ".git", "worktrees");
+  if (existsSync(wtDir)) {
+    try { rmSync(wtDir, { recursive: true, force: true }); } catch {}
+  }
+  await projectGit.fetch(agent.agentDir, `${agent.branch}:${agent.branch}`, ["--force"]);
+  return true;
+}
+
+/** Merge agent branch into default branch.
+ *  1) Push agent branch to remote  2) Fetch in project dir  3) Merge  4) Push default branch */
 export async function mergeRepo(
   agent: store.AgentData,
   projectPath: string,
@@ -420,158 +455,84 @@ export async function mergeRepo(
   const git = simpleGit(projectPath);
   const branchName = agent.branch;
   const defaultBranch = await gitSvc.getDefaultBranch(projectPath);
+  const hasOrigin = await gitSvc.hasOrigin(projectPath);
 
   state.git.op = "merging";
 
-  try {
-    await git.fetch("origin", branchName);
-
-    const logResult = await git.log({ from: defaultBranch, to: `origin/${branchName}`, "--oneline": null });
-    const commits = logResult.all.map(c => `${c.hash.slice(0, 7)} ${c.message}`).join("\n");
-    const diffStats = (await git.diff(["--stat", `${defaultBranch}..origin/${branchName}`])).trim();
-
-    if (!commits) throw new Error("No new commits to merge");
-
-    const lastMsg = logResult.latest?.message || "";
-    const issueId = agent.issueId;
-
-    await git.merge([`origin/${branchName}`, "--no-ff", "-m", `Merge ${issueId}: ${lastMsg}`]);
-    await git.push("origin", defaultBranch);
-
-    state.git.op = "idle";
-    return { commits, diffStats };
-  } catch (err) {
-    state.git.op = "idle";
-    throw err;
-  }
-}
-
-/** Merge worktree agent branch locally (no remote push of branch needed). */
-export async function mergeWorktree(
-  agent: store.AgentData,
-  projectPath: string,
-  state: AgentState,
-): Promise<{ commits: string; diffStats: string }> {
-  if (!agent.branch) throw new Error("No agent branch");
-
-  const git = simpleGit(projectPath);
-  const branchName = agent.branch;
-  const defaultBranch = await gitSvc.getDefaultBranch(projectPath);
-
-  state.git.op = "merging";
+  let didStash = false;
 
   try {
-    // Ensure we're on default branch
+    // 0. Auto-commit orchestrator-managed files if they're dirty (prevents merge failures)
+    try {
+      const status = await git.status();
+      const dirty = status.files.filter(f => f.path !== "");
+      if (dirty.length > 0) {
+        const managedDirty = dirty.filter(f => isManagedPath(f.path));
+        const otherDirty = dirty.filter(f => !isManagedPath(f.path));
+
+        if (managedDirty.length > 0 && otherDirty.length === 0) {
+          // Only orchestrator files are dirty — auto-commit them
+          await git.add(managedDirty.map(f => f.path));
+          await git.commit("chore: update orchestrator-managed files");
+        } else if (dirty.length > 0) {
+          // Other files dirty too — stash everything
+          const stashResult = await git.stash(["push", "--include-untracked", "-m", "merge-auto-stash"]);
+          didStash = !stashResult.includes("No local changes");
+        }
+      }
+    } catch {}
+
+    // 1. Push agent branch to remote
+    try { await pushBranchToRemote(agent, projectPath); } catch { /* best effort */ }
+
+    // 2. Fetch the branch in project dir
+    if (hasOrigin) {
+      try { await git.fetch("origin", branchName); } catch { /* may not be on remote yet */ }
+    }
+
+    // 3. Checkout default branch, pull latest
     await git.checkout(defaultBranch);
-    await git.pull("origin", defaultBranch);
+    if (hasOrigin) {
+      try { await git.pull("origin", defaultBranch, ["--ff-only"]); } catch {}
+    }
 
-    const logResult = await git.log({ from: defaultBranch, to: branchName, "--oneline": null });
+    // 4. Determine merge ref — prefer origin/ if available, else local branch
+    let mergeRef = branchName;
+    if (hasOrigin) {
+      const remoteExists = await git.raw(["rev-parse", "--verify", `origin/${branchName}`]).then(() => true).catch(() => false);
+      if (remoteExists) mergeRef = `origin/${branchName}`;
+    }
+
+    // 5. Gather commit info
+    const logResult = await git.log({ from: defaultBranch, to: mergeRef, "--oneline": null });
     const commits = logResult.all.map(c => `${c.hash.slice(0, 7)} ${c.message}`).join("\n");
-    const diffStats = (await git.diff(["--stat", `${defaultBranch}..${branchName}`])).trim();
-
+    const diffStats = (await git.diff(["--stat", `${defaultBranch}..${mergeRef}`])).trim();
     if (!commits) throw new Error("No new commits to merge");
 
+    // 6. Merge
     const lastMsg = logResult.latest?.message || "";
-    const issueId = agent.issueId;
+    await git.merge([mergeRef, "--no-ff", "-m", `Merge ${agent.issueId}: ${lastMsg}`]);
 
-    await git.merge([branchName, "--no-ff", "-m", `Merge ${issueId}: ${lastMsg}`]);
-    await git.push("origin", defaultBranch);
+    // 7. Push default branch
+    if (hasOrigin) {
+      await git.push("origin", defaultBranch);
+    }
 
-    // Delete the local branch after merge
+    // 8. Cleanup local branch
     try { await git.branch(["-d", branchName]); } catch {}
 
+    // 9. Restore stashed changes
+    if (didStash) { try { await git.stash(["pop"]); } catch {} }
+
     state.git.op = "idle";
     return { commits, diffStats };
   } catch (err) {
+    if (didStash) { try { await git.stash(["pop"]); } catch {} }
     state.git.op = "idle";
     throw err;
   }
 }
 
-/** Clone via git worktree — lightweight, shares .git with parent repo. */
-export async function worktreeClone(
-  agent: store.AgentData,
-  projectPath: string,
-  state: AgentState,
-  onProgress?: (msg: string) => void,
-): Promise<void> {
-  const agentDir = agent.agentDir!;
-
-  // Check if worktree is already set up (worktree .git is a *file*, not a directory)
-  const dotGit = join(agentDir, ".git");
-  if (existsSync(dotGit)) {
-    try {
-      const stat = statSync(dotGit);
-      if (stat.isFile()) return; // valid worktree already exists
-    } catch {}
-    // If .git is a directory, it's a broken clone — remove and redo
-    rmSync(agentDir, { recursive: true, force: true });
-  }
-
-  onProgress?.("creating worktree");
-  mkdirSync(dirname(agentDir), { recursive: true });
-
-  if (existsSync(agentDir)) rmSync(agentDir, { recursive: true, force: true });
-
-  const branchName = agent.branch || `agent/${agent.issueId}`;
-  const git = simpleGit(projectPath);
-
-  // Ensure repo has at least one commit (worktree needs HEAD to exist)
-  try {
-    await git.log(["-1"]);
-  } catch {
-    // No commits — create an initial one
-    const gitignorePath = join(projectPath, ".gitignore");
-    if (!existsSync(gitignorePath)) {
-      writeFileSync(gitignorePath, ".10timesdev/\n.env.10timesdev\n");
-    }
-    await git.add("-A");
-    await git.commit("Initial commit");
-  }
-
-  // Fetch latest from remote if configured (ignore errors for repos without remote)
-  try {
-    const remotes = await git.getRemotes();
-    if (remotes.some((r) => r.name === "origin")) {
-      await git.fetch("origin");
-    }
-  } catch {
-    // No remote or fetch failed — continue with local HEAD
-  }
-
-  // Remove stale branch ref if it exists (from a previous failed spawn)
-  try {
-    const branches = await git.branchLocal();
-    if (branches.all.includes(branchName)) {
-      await git.raw(["branch", "-D", branchName]);
-    }
-  } catch {}
-
-  // Create worktree on a new branch from HEAD
-  await git.raw(["worktree", "add", "-b", branchName, agentDir, "HEAD"]);
-
-  state.git.branch = branchName;
-}
-
-/** Remove a worktree cleanly. */
-export async function removeWorktree(
-  agent: store.AgentData,
-  projectPath: string,
-): Promise<void> {
-  if (!agent.agentDir) return;
-  try {
-    const git = simpleGit(projectPath);
-    await git.raw(["worktree", "remove", agent.agentDir, "--force"]);
-  } catch {
-    // Fallback: manual cleanup
-    if (existsSync(agent.agentDir)) {
-      rmSync(agent.agentDir, { recursive: true, force: true });
-    }
-    try {
-      await simpleGit(projectPath).raw(["worktree", "prune"]);
-    } catch {}
-  }
-}
 
 /** Create agent branch, commit .gitignore, configure git user. */
 export async function setupAgentBranch(agentDir: string, branchName: string): Promise<void> {
@@ -605,7 +566,10 @@ export async function commitGitIgnoreIfNeeded(agentDir: string): Promise<void> {
 /** Checkout a specific branch in agent directory (used by restore). */
 export async function checkoutBranch(agentDir: string, branch: string): Promise<void> {
   const git = simpleGit(agentDir);
-  await git.fetch("origin", branch);
+  const hasRemote = await gitSvc.hasOrigin(agentDir).catch(() => false);
+  if (hasRemote) {
+    try { await git.fetch("origin", branch); } catch {}
+  }
   await git.checkout(branch);
 }
 

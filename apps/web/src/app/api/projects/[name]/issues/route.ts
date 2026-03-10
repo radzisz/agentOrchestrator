@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as store from "@/lib/store";
-import {
-  listLocalIssues,
-  createLocalIssue,
-} from "@/lib/issue-trackers/local-tracker";
+import * as db from "@/lib/db";
+import { createLocalIssue } from "@/lib/issue-trackers/local-tracker";
 
 export async function GET(
   req: NextRequest,
@@ -15,30 +13,52 @@ export async function GET(
 
   const q = req.nextUrl.searchParams.get("q")?.toLowerCase() || "";
   const phase = req.nextUrl.searchParams.get("phase") || "";
+  const source = req.nextUrl.searchParams.get("source") || "";
 
-  let issues = listLocalIssues(project.path);
+  const dbOpts: Parameters<typeof db.listIssues>[0] = {
+    projectPath: project.path,
+  };
+
+  if (source) dbOpts.source = source;
 
   if (phase && phase !== "all") {
     if (phase === "open") {
-      issues = issues.filter((i) => !["done", "cancelled"].includes(i.phase));
+      dbOpts.phase = ["todo", "in_progress", "in_review"];
     } else {
-      issues = issues.filter((i) => i.phase === phase);
+      dbOpts.phase = phase;
     }
   }
 
+  let rows = db.listIssues(dbOpts);
+
   if (q) {
-    issues = issues.filter(
-      (i) =>
-        i.title.toLowerCase().includes(q) ||
-        i.identifier.toLowerCase().includes(q) ||
-        (i.description?.toLowerCase().includes(q) ?? false),
+    rows = rows.filter(
+      (r) =>
+        r.title.toLowerCase().includes(q) ||
+        r.identifier.toLowerCase().includes(q) ||
+        (r.description?.toLowerCase().includes(q) ?? false),
     );
   }
 
-  // Newest first
-  issues.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const result = rows.map((r) => {
+    const labels: string[] = JSON.parse(r.labels || "[]");
+    const comments = db.getComments(r.id);
+    return {
+      id: r.id,
+      identifier: r.identifier,
+      title: r.title,
+      description: r.description,
+      phase: r.phase,
+      labels,
+      source: r.source,
+      createdBy: r.created_by,
+      createdAt: r.created_at || "",
+      url: r.url,
+      commentCount: comments.length,
+    };
+  });
 
-  return NextResponse.json(issues);
+  return NextResponse.json(result);
 }
 
 export async function POST(

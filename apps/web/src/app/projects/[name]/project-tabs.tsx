@@ -68,7 +68,12 @@ export function ProjectTabs({
       <div className="sticky top-0 z-10 bg-background border-b border-border">
         <div className="px-6 py-3 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">{project.name}</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-bold">{project.name}</h1>
+              <Badge variant={project.repoUrl ? "default" : "secondary"} className="text-[10px] h-5">
+                {project.repoUrl ? "remote" : "local"}
+              </Badge>
+            </div>
             <p className="text-muted-foreground text-sm">{project.repoPath || project.repoUrl}</p>
           </div>
           <SpawnButton projectName={project.name} />

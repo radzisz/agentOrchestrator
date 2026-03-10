@@ -377,6 +377,18 @@ export async function checkoutDefault(cwd: string): Promise<void> {
   }
 }
 
+/** Pull the default branch in the host project directory. No-op if no origin. */
+export async function pullMainBranch(cwd: string): Promise<void> {
+  if (!(await hasOrigin(cwd))) return;
+  const defaultBranch = await getDefaultBranch(cwd);
+  const git = simpleGit(cwd);
+  const current = await git.revparse(["--abbrev-ref", "HEAD"]);
+  if (current.trim() !== defaultBranch) {
+    return;
+  }
+  await git.pull("origin", defaultBranch, ["--ff-only"]);
+}
+
 /** Delete a remote branch. No-op if no origin. */
 export async function deleteRemoteBranch(
   cwd: string,

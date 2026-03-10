@@ -34,10 +34,27 @@ async function tgApi(token: string, method: string, body: Record<string, unknown
   }
 }
 
-async function getTopicId(issueId: string): Promise<number | null> {
-  if (!ctx) return null;
-  const val = await ctx.getConfig(`topic:${issueId}`);
-  return val ? parseInt(val) : null;
+function getTopicId(issueId: string): number | null {
+  try {
+    const store = require("@/lib/store") as typeof import("@/lib/store");
+    for (const p of store.listProjects()) {
+      const val = store.getAgentMeta(p.path, issueId, "telegram:topicId");
+      if (val) return parseInt(val);
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function setTopicId(issueId: string, topicId: number): void {
+  try {
+    const store = require("@/lib/store") as typeof import("@/lib/store");
+    for (const p of store.listProjects()) {
+      if (store.getAgent(p.path, issueId)) {
+        store.setAgentMeta(p.path, issueId, "telegram:topicId", topicId.toString());
+        return;
+      }
+    }
+  } catch { /* ignore */ }
 }
 
 async function resolveTitle(issueId: string): Promise<string> {
@@ -57,7 +74,7 @@ async function ensureTopic(
   issueId: string,
   title?: string,
 ): Promise<number | null> {
-  const existing = await getTopicId(issueId);
+  const existing = getTopicId(issueId);
   if (existing) {
     log(`Topic for ${issueId}: ${existing} (cached)`);
     return existing;
@@ -72,8 +89,8 @@ async function ensureTopic(
   });
 
   const topicId = resp?.result?.message_thread_id;
-  if (topicId && ctx) {
-    await ctx.setConfig(`topic:${issueId}`, topicId.toString());
+  if (topicId) {
+    setTopicId(issueId, topicId);
     log(`Created topic for ${issueId}: ${topicId}`);
 
     const pinResp = await tgApi(creds.token, "sendMessage", {
@@ -104,7 +121,7 @@ async function send(issueId: string, message: string): Promise<void> {
     return;
   }
 
-  let topicId = await getTopicId(issueId);
+  let topicId = getTopicId(issueId);
   if (!topicId) {
     topicId = await ensureTopic(creds, issueId);
   }
@@ -125,7 +142,7 @@ async function send(issueId: string, message: string): Promise<void> {
 async function closeTopic(issueId: string): Promise<void> {
   const creds = resolveCredentials(issueId);
   if (!creds) return;
-  const topicId = await getTopicId(issueId);
+  const topicId = getTopicId(issueId);
   if (!topicId) return;
 
   log(`Closing topic for ${issueId} (topic ${topicId})`);
@@ -163,6 +180,34 @@ export const telegramIntegration: Integration = {
       if (existing === null) {
         await ctx.setConfig(key, "");
       }
+    }
+
+    // Migrate legacy topic:* entries from global config to agent meta
+    try {
+      const store = require("@/lib/store") as typeof import("@/lib/store");
+      const appConfig = store.getConfig();
+      const tgConfig = appConfig.integrations?.telegram?.config;
+      if (tgConfig) {
+        const topicKeys = Object.keys(tgConfig).filter((k) => k.startsWith("topic:"));
+        if (topicKeys.length > 0) {
+          for (const key of topicKeys) {
+            const issueId = key.replace("topic:", "");
+            const topicId = tgConfig[key];
+            // Find agent and migrate
+            for (const p of store.listProjects()) {
+              if (store.getAgent(p.path, issueId)) {
+                store.setAgentMeta(p.path, issueId, "telegram:topicId", topicId);
+                break;
+              }
+            }
+            delete tgConfig[key];
+          }
+          store.saveConfig(appConfig);
+          ctx.log(`Migrated ${topicKeys.length} topic mappings from global config to agent meta`);
+        }
+      }
+    } catch (err) {
+      ctx.log(`Topic migration failed (non-critical): ${err}`);
     }
 
     ctx.log("Telegram integration registered");

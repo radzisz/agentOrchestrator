@@ -1,10 +1,11 @@
 // ---------------------------------------------------------------------------
-// Local issue tracker — stores issues in {projectPath}/.10timesdev/local-issues.json
+// Local issue tracker — backed by SQLite (orchestrator.db)
 // ---------------------------------------------------------------------------
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
-import { join } from "path";
 import { randomUUID } from "crypto";
+import { existsSync } from "fs";
+import { join } from "path";
+import * as db from "@/lib/db";
 import type {
   IssueTracker,
   TrackerIssue,
@@ -14,10 +15,46 @@ import type {
 } from "./types";
 
 // ---------------------------------------------------------------------------
-// Persistence helpers
+// Auto-migration: import legacy local-issues.json on first access per project
 // ---------------------------------------------------------------------------
 
-interface LocalIssueRecord {
+const _migrated = new Set<string>();
+
+function ensureMigrated(projectPath: string): void {
+  if (_migrated.has(projectPath)) return;
+  _migrated.add(projectPath);
+  const jsonPath = join(projectPath, ".10timesdev", "local-issues.json");
+  if (existsSync(jsonPath)) {
+    db.migrateLocalIssuesJson(projectPath, jsonPath);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Identifier generation
+// ---------------------------------------------------------------------------
+
+function nextIdentifier(projectPath: string): string {
+  const parts = projectPath.replace(/\\/g, "/").split("/").filter(Boolean);
+  const folderName = parts[parts.length - 1] || "LOCAL";
+  const prefix = folderName
+    .replace(/[^a-zA-Z]/g, "")
+    .toUpperCase()
+    .slice(0, 4) || "LOC";
+
+  const existing = db.listIssues({ projectPath, source: "local" });
+  const maxNum = existing.reduce((max, i) => {
+    const m = i.identifier.match(new RegExp(`^${prefix}-(\\d+)$`));
+    return m ? Math.max(max, parseInt(m[1])) : max;
+  }, 0);
+
+  return `${prefix}-${maxNum + 1}`;
+}
+
+// ---------------------------------------------------------------------------
+// Legacy-compatible record type (for callers that still use it)
+// ---------------------------------------------------------------------------
+
+export interface LocalIssueRecord {
   id: string;
   identifier: string;
   title: string;
@@ -28,55 +65,39 @@ interface LocalIssueRecord {
   comments: Array<{ body: string; createdAt: string; authorName: string }>;
 }
 
-function issuesFilePath(projectPath: string): string {
-  return join(projectPath, ".10timesdev", "local-issues.json");
-}
-
-function readIssues(projectPath: string): LocalIssueRecord[] {
-  const fp = issuesFilePath(projectPath);
-  if (!existsSync(fp)) return [];
-  try {
-    return JSON.parse(readFileSync(fp, "utf-8"));
-  } catch {
-    return [];
-  }
-}
-
-function writeIssues(projectPath: string, issues: LocalIssueRecord[]): void {
-  const dir = join(projectPath, ".10timesdev");
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(issuesFilePath(projectPath), JSON.stringify(issues, null, 2));
-}
-
-function nextIdentifier(projectPath: string, issues: LocalIssueRecord[]): string {
-  // Derive prefix from project folder name
-  const parts = projectPath.replace(/\\/g, "/").split("/").filter(Boolean);
-  const folderName = parts[parts.length - 1] || "LOCAL";
-  const prefix = folderName
-    .replace(/[^a-zA-Z]/g, "")
-    .toUpperCase()
-    .slice(0, 4) || "LOC";
-
-  const maxNum = issues.reduce((max, i) => {
-    const m = i.identifier.match(new RegExp(`^${prefix}-(\\d+)$`));
-    return m ? Math.max(max, parseInt(m[1])) : max;
-  }, 0);
-
-  return `${prefix}-${maxNum + 1}`;
+function dbToRecord(row: db.DbIssue, projectPath: string): LocalIssueRecord {
+  const comments = db.getComments(row.id);
+  return {
+    id: row.id,
+    identifier: row.identifier,
+    title: row.title,
+    description: row.description,
+    phase: row.phase as TrackerPhase,
+    labels: JSON.parse(row.labels || "[]"),
+    createdAt: row.created_at || new Date().toISOString(),
+    comments: comments.map((c) => ({
+      body: c.body,
+      createdAt: c.created_at || "",
+      authorName: c.author_name || "unknown",
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Public CRUD
 // ---------------------------------------------------------------------------
 
-export type { LocalIssueRecord };
-
 export function listLocalIssues(projectPath: string): LocalIssueRecord[] {
-  return readIssues(projectPath);
+  ensureMigrated(projectPath);
+  const rows = db.listIssues({ projectPath, source: "local" });
+  return rows.map((r) => dbToRecord(r, projectPath));
 }
 
 export function getLocalIssue(projectPath: string, id: string): LocalIssueRecord | null {
-  return readIssues(projectPath).find((i) => i.id === id) ?? null;
+  ensureMigrated(projectPath);
+  const row = db.getIssue(id);
+  if (!row || row.source !== "local" || row.project_path !== projectPath) return null;
+  return dbToRecord(row, projectPath);
 }
 
 export function createLocalIssue(
@@ -85,20 +106,39 @@ export function createLocalIssue(
   description?: string,
   labels?: string[],
 ): LocalIssueRecord {
-  const issues = readIssues(projectPath);
-  const record: LocalIssueRecord = {
-    id: randomUUID(),
-    identifier: nextIdentifier(projectPath, issues),
+  ensureMigrated(projectPath);
+  const id = randomUUID();
+  const identifier = nextIdentifier(projectPath);
+  const now = new Date().toISOString();
+  const issueLabels = labels ?? ["agent"];
+
+  db.upsertIssue({
+    id,
+    project_path: projectPath,
+    source: "local",
+    external_id: id,
+    identifier,
+    title,
+    description: description || null,
+    priority: 3,
+    phase: "todo",
+    raw_state: "todo",
+    labels: JSON.stringify(issueLabels),
+    created_by: "local",
+    created_at: now,
+    url: null,
+  });
+
+  return {
+    id,
+    identifier,
     title,
     description: description || null,
     phase: "todo",
-    labels: labels ?? ["agent"],
-    createdAt: new Date().toISOString(),
+    labels: issueLabels,
+    createdAt: now,
     comments: [],
   };
-  issues.push(record);
-  writeIssues(projectPath, issues);
-  return record;
 }
 
 export function updateLocalIssue(
@@ -106,51 +146,52 @@ export function updateLocalIssue(
   id: string,
   updates: Partial<Pick<LocalIssueRecord, "title" | "description" | "phase" | "labels">>,
 ): LocalIssueRecord | null {
-  const issues = readIssues(projectPath);
-  const idx = issues.findIndex((i) => i.id === id);
-  if (idx < 0) return null;
-  if (updates.title !== undefined) issues[idx].title = updates.title;
-  if (updates.description !== undefined) issues[idx].description = updates.description;
-  if (updates.phase !== undefined) issues[idx].phase = updates.phase;
-  if (updates.labels !== undefined) issues[idx].labels = updates.labels;
-  writeIssues(projectPath, issues);
-  return issues[idx];
+  ensureMigrated(projectPath);
+  const row = db.getIssue(id);
+  if (!row || row.source !== "local" || row.project_path !== projectPath) return null;
+
+  const dbUpdates: Parameters<typeof db.updateIssue>[1] = {};
+  if (updates.title !== undefined) dbUpdates.title = updates.title;
+  if (updates.description !== undefined) dbUpdates.description = updates.description;
+  if (updates.phase !== undefined) { dbUpdates.phase = updates.phase; dbUpdates.raw_state = updates.phase; }
+  if (updates.labels !== undefined) dbUpdates.labels = JSON.stringify(updates.labels);
+
+  db.updateIssue(id, dbUpdates);
+  return getLocalIssue(projectPath, id);
 }
 
 export function deleteLocalIssue(projectPath: string, id: string): boolean {
-  const issues = readIssues(projectPath);
-  const idx = issues.findIndex((i) => i.id === id);
-  if (idx < 0) return false;
-  issues.splice(idx, 1);
-  writeIssues(projectPath, issues);
-  return true;
+  ensureMigrated(projectPath);
+  return db.deleteIssue(id);
 }
 
 // ---------------------------------------------------------------------------
 // Map to TrackerIssue
 // ---------------------------------------------------------------------------
 
-function toTrackerIssue(r: LocalIssueRecord): TrackerIssue {
+function toTrackerIssue(row: db.DbIssue, projectPath: string): TrackerIssue {
+  const comments = db.getComments(row.id);
+  const labels: string[] = JSON.parse(row.labels || "[]");
   return {
-    externalId: r.id,
-    identifier: r.identifier,
-    title: r.title,
-    description: r.description,
-    priority: 3,
-    phase: r.phase,
-    rawState: r.phase,
-    labels: r.labels,
-    createdBy: "local",
-    createdAt: r.createdAt,
-    url: null,
+    externalId: row.id,
+    identifier: row.identifier,
+    title: row.title,
+    description: row.description,
+    priority: row.priority,
+    phase: row.phase as TrackerPhase,
+    rawState: row.raw_state || row.phase,
+    labels,
+    createdBy: row.created_by || "local",
+    createdAt: row.created_at,
+    url: row.url,
     source: "local",
-    comments: r.comments.map((c) => ({
+    comments: comments.map((c) => ({
       body: c.body,
-      createdAt: c.createdAt,
-      authorName: c.authorName,
-      isBot: false,
+      createdAt: c.created_at || "",
+      authorName: c.author_name || "unknown",
+      isBot: c.is_bot === 1,
     })),
-    _raw: r,
+    _raw: row,
   };
 }
 
@@ -161,7 +202,7 @@ function toTrackerIssue(r: LocalIssueRecord): TrackerIssue {
 const localSchema: TrackerTypeSchema = {
   type: "local",
   displayName: "Local",
-  fields: [], // No config needed
+  fields: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -180,42 +221,31 @@ export const localTracker: IssueTracker = {
   canCreateIssue: true,
 
   async pollIssues(projectPath: string): Promise<TrackerIssue[]> {
-    const issues = readIssues(projectPath);
-    // Return only open issues (todo / in_progress / in_review) with the agent label
-    return issues
-      .filter((i) => !["done", "cancelled"].includes(i.phase) && i.labels.includes("agent"))
-      .map(toTrackerIssue);
+    ensureMigrated(projectPath);
+    const rows = db.listIssues({
+      projectPath,
+      source: "local",
+      phase: ["todo", "in_progress", "in_review"],
+      label: "agent",
+    });
+    return rows.map((r) => toTrackerIssue(r, projectPath));
   },
 
-  async transitionTo(issue: TrackerIssue, phase: TrackerPhase, projectPath: string): Promise<void> {
-    const issues = readIssues(projectPath);
-    const idx = issues.findIndex((i) => i.id === issue.externalId);
-    if (idx >= 0) {
-      issues[idx].phase = phase;
-      writeIssues(projectPath, issues);
-    }
+  async transitionTo(issue: TrackerIssue, phase: TrackerPhase): Promise<void> {
+    db.updateIssuePhase(issue.externalId, phase);
   },
 
-  async addComment(issue: TrackerIssue, body: string, projectPath: string): Promise<void> {
-    const issues = readIssues(projectPath);
-    const idx = issues.findIndex((i) => i.id === issue.externalId);
-    if (idx >= 0) {
-      issues[idx].comments.push({
-        body,
-        createdAt: new Date().toISOString(),
-        authorName: "orchestrator",
-      });
-      writeIssues(projectPath, issues);
-    }
+  async addComment(issue: TrackerIssue, body: string): Promise<void> {
+    db.addComment(issue.externalId, body, "orchestrator", true);
   },
 
-  async getComments(issue: TrackerIssue, _projectPath: string): Promise<TrackerComment[]> {
-    const raw = issue._raw as LocalIssueRecord;
-    return (raw.comments || []).map((c) => ({
+  async getComments(issue: TrackerIssue): Promise<TrackerComment[]> {
+    const comments = db.getComments(issue.externalId);
+    return comments.map((c) => ({
       body: c.body,
-      createdAt: c.createdAt,
-      authorName: c.authorName,
-      isBot: c.authorName === "orchestrator",
+      createdAt: c.created_at || "",
+      authorName: c.author_name || "unknown",
+      isBot: c.is_bot === 1,
     }));
   },
 
@@ -224,8 +254,9 @@ export const localTracker: IssueTracker = {
   },
 
   async getIssue(externalId: string, projectPath: string): Promise<TrackerIssue | null> {
-    const issues = readIssues(projectPath);
-    const found = issues.find((i) => i.id === externalId);
-    return found ? toTrackerIssue(found) : null;
+    ensureMigrated(projectPath);
+    const row = db.getIssue(externalId);
+    if (!row) return null;
+    return toTrackerIssue(row, projectPath);
   },
 };

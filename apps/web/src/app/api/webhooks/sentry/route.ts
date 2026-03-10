@@ -95,6 +95,7 @@ export async function POST(req: NextRequest) {
       rawState: issue.status || "unresolved",
       labels: [],
       createdBy: null,
+      createdAt: issue.firstSeen || new Date().toISOString(),
       url: sentryUrl,
       source: "sentry",
       comments: [],

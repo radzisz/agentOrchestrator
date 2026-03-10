@@ -55,6 +55,8 @@ export interface AgentState {
   linearStatus: TrackerStatusValue;
   git: GitState;
   services: Record<string, ServiceState>;
+  /** Last error message — set when spawn/merge fails. */
+  lastError?: string;
 }
 
 /** Deep-readonly version of AgentState — returned by aggregate.snapshot. */
@@ -67,6 +69,7 @@ export type ReadonlyAgentState = Readonly<{
   linearStatus: TrackerStatusValue;
   git: Readonly<GitState>;
   services: Readonly<Record<string, Readonly<ServiceState>>>;
+  lastError?: string;
 }>;
 
 export interface CurrentOperation {
@@ -110,6 +113,11 @@ export function deriveUiStatus(
   // Running: agent process alive
   if (state.agent === "running") {
     return { status: "running" };
+  }
+
+  // Error: lastError present on a pending/spawning agent
+  if (state.lastError && (state.lifecycle === "pending" || state.lifecycle === "spawning")) {
+    return { status: "awaiting", reason: "error" };
   }
 
   // Closed: lifecycle removed, or tracker closed AND no active resources

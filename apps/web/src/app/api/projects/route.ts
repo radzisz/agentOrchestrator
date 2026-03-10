@@ -40,7 +40,7 @@ export function ensureGitRepo(repoPath: string): boolean {
   if (!existsSync(repoPath)) return false;
   if (existsSync(join(repoPath, ".git"))) return false;
   try {
-    const opts = { cwd: repoPath, timeout: 5000, stdio: ["pipe", "pipe", "pipe"] as const };
+    const opts = { cwd: repoPath, timeout: 5000, stdio: "pipe" as const };
     execSync("git init", opts);
 
     // Ensure .gitignore excludes orchestrator files
@@ -98,8 +98,7 @@ export async function createProject(input: CreateProjectInput): Promise<CreatePr
 
   // Build and save config
   const envConfig: store.ProjectConfig = {};
-  const repoUrl = input.repoUrl || discoverGitRemoteUrl(repoPath);
-  if (repoUrl) envConfig.REPO_URL = repoUrl;
+  if (input.repoUrl) envConfig.REPO_URL = input.repoUrl;
   if (input.supabaseAccessToken) envConfig.SUPABASE_ACCESS_TOKEN = input.supabaseAccessToken;
   if (input.supabaseProjectRef) envConfig.SUPABASE_PROJECT_REF = input.supabaseProjectRef;
   if (input.netlifyAuthToken) envConfig.NETLIFY_AUTH_TOKEN = input.netlifyAuthToken;

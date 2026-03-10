@@ -35,6 +35,7 @@ export interface AgentStateData {
   linearStatus: string;
   git: GitStateData;
   services: Record<string, { status: string; error?: string }>;
+  lastError?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +300,7 @@ function deriveNextSteps(
       type: "action",
       icon: <Trash2 className="h-3.5 w-3.5" />,
       text: "Remove container, local clone and volumes.",
-      buttonLabel: "Remove files",
+      buttonLabel: "Cleanup",
       buttonVariant: "destructive",
       onClick: () => { window.dispatchEvent(new Event("open-remove-dialog")); },
     });
@@ -308,6 +309,26 @@ function deriveNextSteps(
 
   // ── Pending / Spawning (not yet ready) ──
   if (state.lifecycle === "pending" || state.lifecycle === "spawning") {
+    // If there's a lastError, show it as a warning instead of the spinner
+    if (state.lastError) {
+      return [
+        {
+          key: "spawn-error",
+          type: "warning" as const,
+          icon: <AlertTriangle className="h-3.5 w-3.5" />,
+          text: state.lastError,
+        },
+        {
+          key: "cancel-spawn",
+          type: "action" as const,
+          icon: <Ban className="h-3.5 w-3.5" />,
+          text: "Cancel and clean up.",
+          buttonLabel: "Cancel",
+          buttonVariant: "destructive" as const,
+          onClick: () => { window.dispatchEvent(new Event("open-reject-dialog")); },
+        },
+      ];
+    }
     return [
       {
         key: "pending",

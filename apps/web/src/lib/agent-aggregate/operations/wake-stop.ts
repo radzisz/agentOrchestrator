@@ -53,20 +53,14 @@ async function ensureWorkspaceReady(
     ctx.opLog("wake", `workspace missing .git — re-cloning`);
     setProgress("restoring workspace");
 
-    // Determine clone strategy: worktree for local source, full clone for remote
-    const isWorktree = ctx.agent.trackerSource === "local";
-    if (isWorktree) {
-      await gitOps.worktreeClone(ctx.agent, ctx.projectPath, ctx.state, setProgress);
-    } else {
-      await gitOps.cloneRepo(ctx.agent, ctx.projectPath, ctx.state, setProgress);
+    await gitOps.cloneRepo(ctx.agent, ctx.projectPath, ctx.state, setProgress);
 
-      // Checkout agent branch if it exists on remote
-      setProgress("checking out branch");
-      try {
-        await gitOps.checkoutBranch(agentDir, branch);
-      } catch {
-        ctx.opLog("wake", `branch ${branch} not found on remote — starting from default`);
-      }
+    // Checkout agent branch if it exists on remote
+    setProgress("checking out branch");
+    try {
+      await gitOps.checkoutBranch(agentDir, branch);
+    } catch {
+      ctx.opLog("wake", `branch ${branch} not found on remote — starting from default`);
     }
 
     // Copy .env if exists in project

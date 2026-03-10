@@ -129,6 +129,8 @@ export interface AgentData {
   currentOperation?: import("@/lib/agent-aggregate/types").CurrentOperation | null;
   // UI status — derived, always written on save
   uiStatus?: import("@/lib/agent-aggregate/types").UiState;
+  /** Generic key-value metadata — integrations can store per-agent data here (e.g. telegram topic IDs). */
+  meta?: Record<string, string>;
 }
 
 export type RuntimeType = "LOCAL" | "REMOTE";
@@ -163,10 +165,115 @@ export interface ProjectConfig {
 // Paths
 // ---------------------------------------------------------------------------
 
-// config.json lives at workspace root; find it relative to cwd (apps/web → ../..)
-const CONFIG_PATH = existsSync(join(process.cwd(), "config.json"))
-  ? join(process.cwd(), "config.json")
-  : join(process.cwd(), "..", "..", "config.json");
+// Global config lives in .config/ at workspace root
+function findWorkspaceRoot(): string {
+  const fromCwd = process.cwd();
+  const fromMonorepo = join(fromCwd, "..", "..");
+  if (existsSync(join(fromCwd, "pnpm-workspace.yaml")) || existsSync(join(fromCwd, ".config"))) return fromCwd;
+  if (existsSync(join(fromMonorepo, "pnpm-workspace.yaml")) || existsSync(join(fromMonorepo, ".config"))) return fromMonorepo;
+  return fromCwd;
+}
+
+const CONFIG_DIR = join(findWorkspaceRoot(), ".config");
+const CONFIG_PATH = join(CONFIG_DIR, "config.json");
+const SECRETS_PATH = join(CONFIG_DIR, ".env.secrets");
+
+// ---------------------------------------------------------------------------
+// Global secrets — extract sensitive fields from config.json to .env.secrets
+// ---------------------------------------------------------------------------
+
+/** Maps instance type → secret field names within instance.config */
+const INSTANCE_SECRET_FIELDS: Record<string, string[]> = {
+  linear: ["apiKey"],
+  sentry: ["authToken"],
+  telegram: ["botToken"],
+  github: ["token", "defaultToken"],
+  gitlab: ["token"],
+  supabase: ["accessToken"],
+  netlify: ["authToken"],
+  vercel: ["authToken"],
+  aider: ["OPENAI_API_KEY"],
+};
+
+/** Category prefixes for env key generation */
+const INSTANCE_CATEGORIES: Record<string, string> = {
+  trackerInstances: "TRACKER",
+  imProviderInstances: "IM",
+  repoProviderInstances: "REPO",
+  rtenvInstances: "RTENV",
+  aiProviderInstances: "AI",
+};
+
+function readSecrets(): Record<string, string> {
+  if (!existsSync(SECRETS_PATH)) return {};
+  const content = readFileSync(SECRETS_PATH, "utf-8");
+  const result: Record<string, string> = {};
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    result[trimmed.substring(0, eqIdx)] = trimmed.substring(eqIdx + 1);
+  }
+  return result;
+}
+
+function writeSecrets(secrets: Record<string, string>): void {
+  const lines = ["# Auto-generated — do not edit manually"];
+  for (const [key, value] of Object.entries(secrets).sort(([a], [b]) => a.localeCompare(b))) {
+    if (value) lines.push(`${key}=${value}`);
+  }
+  writeFileSync(SECRETS_PATH, lines.join("\n") + "\n", "utf-8");
+}
+
+function stripSecrets(config: AppConfig): { cleaned: AppConfig; secrets: Record<string, string> } {
+  const secrets: Record<string, string> = {};
+
+  // Instance-based sections
+  for (const [section, category] of Object.entries(INSTANCE_CATEGORIES)) {
+    const instances = (config as any)[section] as Array<{ id: string; type: string; config: Record<string, string> }> | undefined;
+    if (!instances) continue;
+    for (const inst of instances) {
+      const secretFields = INSTANCE_SECRET_FIELDS[inst.type];
+      if (!secretFields) continue;
+      for (const field of secretFields) {
+        if (inst.config[field]) {
+          secrets[`${category}_${inst.type}_${inst.id}__${field}`] = inst.config[field];
+          inst.config[field] = "";
+        }
+      }
+    }
+  }
+
+  return { cleaned: config, secrets };
+}
+
+function mergeSecrets(config: AppConfig, secrets: Record<string, string>): void {
+  for (const [key, value] of Object.entries(secrets)) {
+    if (!value) continue;
+    // Skip legacy entries — no longer supported
+    if (key.startsWith("LEGACY_")) continue;
+
+    // CATEGORY_type_id__field
+    const instMatch = key.match(/^([A-Z]+)_([^_]+)_(.+)__(.+)$/);
+    if (!instMatch) continue;
+    const [, category, type, id, field] = instMatch;
+    const section = Object.entries(INSTANCE_CATEGORIES).find(([, cat]) => cat === category)?.[0];
+    if (!section) continue;
+    const instances = (config as any)[section] as Array<{ id: string; type: string; config: Record<string, string> }> | undefined;
+    if (!instances) continue;
+    const inst = instances.find((i) => i.type === type && i.id === id);
+    if (inst) inst.config[field] = value;
+  }
+}
+
+function migrateSecretsIfNeeded(config: AppConfig): void {
+  if (existsSync(SECRETS_PATH)) return;
+  const { cleaned, secrets } = stripSecrets(deepClone(config));
+  if (Object.keys(secrets).length === 0) return;
+  writeSecrets(secrets);
+  writeFileSync(CONFIG_PATH, JSON.stringify(cleaned, null, 2), "utf-8");
+}
 
 export function orchestratorDir(projectPath: string): string {
   return join(projectPath, ".10timesdev");
@@ -234,13 +341,23 @@ export function getConfig(): AppConfig {
   const mtime = statSync(CONFIG_PATH).mtimeMs;
   if (_appConfig && mtime === _appConfigMtime) return _appConfig;
   _appConfig = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
-  _appConfigMtime = mtime;
+  // Auto-migrate secrets on first load
+  migrateSecretsIfNeeded(_appConfig!);
+  // Merge secrets from .env.secrets into in-memory config
+  const secrets = readSecrets();
+  if (Object.keys(secrets).length > 0) {
+    mergeSecrets(_appConfig!, secrets);
+  }
+  _appConfigMtime = statSync(CONFIG_PATH).mtimeMs; // re-read after possible migration write
   return _appConfig!;
 }
 
 export function saveConfig(config: AppConfig): void {
-  _appConfig = config;
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+  const { cleaned, secrets } = stripSecrets(deepClone(config));
+  writeSecrets(secrets);
+  writeFileSync(CONFIG_PATH, JSON.stringify(cleaned, null, 2), "utf-8");
+  _appConfig = config; // cache with secrets in-memory
+  _appConfigMtime = statSync(CONFIG_PATH).mtimeMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +648,21 @@ export function saveAgent(projectPath: string, issueId: string, data: AgentData)
   const p = agentFilePath(projectPath, issueId);
   ensureDir(dirname(p));
   writeFileSync(p, JSON.stringify(data, null, 2), "utf-8");
+}
+
+/** Read a single meta value from an agent. */
+export function getAgentMeta(projectPath: string, issueId: string, key: string): string | null {
+  const agent = getAgentRef(projectPath, issueId);
+  return agent?.meta?.[key] ?? null;
+}
+
+/** Write a single meta value to an agent (persists immediately). */
+export function setAgentMeta(projectPath: string, issueId: string, key: string, value: string): void {
+  const agent = getAgentRef(projectPath, issueId);
+  if (!agent) return;
+  if (!agent.meta) agent.meta = {};
+  agent.meta[key] = value;
+  saveAgent(projectPath, issueId, agent);
 }
 
 export function listAgents(projectPath: string): Array<AgentData & { _projectPath: string }> {

@@ -12,6 +12,7 @@ import { defaultAgentState } from "@/lib/agent-aggregate";
 import { getActiveTrackers, resolveTrackerConfig } from "@/lib/issue-trackers/registry";
 import { Issue } from "@/lib/issue-trackers/types";
 import type { IssueTracker } from "@/lib/issue-trackers/types";
+import * as db from "@/lib/db";
 
 function log(message: string, trackerName?: string) {
   const msg = `[dispatcher] ${message}`;
@@ -117,6 +118,29 @@ async function processProjectTrackers(project: store.ProjectWithConfig): Promise
 
       for (const issueData of issues) {
         allActiveIssueIds.push(issueData.identifier);
+
+        // Cache issue in DB (local tracker already writes directly, skip to avoid double-write)
+        if (issueData.source !== "local") {
+          try {
+            db.upsertIssue({
+              id: issueData.externalId,
+              project_path: project.path,
+              source: issueData.source,
+              external_id: issueData.externalId,
+              identifier: issueData.identifier,
+              title: issueData.title,
+              description: issueData.description,
+              priority: issueData.priority,
+              phase: issueData.phase || "todo",
+              raw_state: issueData.rawState,
+              labels: JSON.stringify(issueData.labels),
+              created_by: issueData.createdBy,
+              created_at: issueData.createdAt,
+              url: issueData.url,
+            });
+          } catch { /* best effort */ }
+        }
+
         try {
           const issue = new Issue(issueData, tracker, project.path);
           await processTrackerIssue(project, issue);
@@ -153,23 +177,23 @@ async function processTrackerIssue(
         return;
       }
       log(`SPAWN ${issueId}: "${issue.title}" (phase=${issue.phase}, hasAgent=${!!agent}, spawned=${agent?.spawned})`);
+      const now = new Date().toISOString();
+      const agentData: store.AgentData = agent || {
+        issueId,
+        title: issueId,
+        status: "SPAWNING" as const,
+        branch: `agent/${issueId}`,
+        servicesEnabled: false,
+        spawned: false,
+        previewed: false,
+        notified: false,
+        createdAt: now,
+        updatedAt: now,
+        state: defaultAgentState(`agent/${issueId}`),
+        currentOperation: null,
+      };
+      const agg = createAggregate(project.name, project.path, agentData);
       try {
-        const now = new Date().toISOString();
-        const agentData: store.AgentData = agent || {
-          issueId,
-          title: issueId,
-          status: "SPAWNING" as const,
-          branch: `agent/${issueId}`,
-          servicesEnabled: false,
-          spawned: false,
-          previewed: false,
-          notified: false,
-          createdAt: now,
-          updatedAt: now,
-          state: defaultAgentState(`agent/${issueId}`),
-          currentOperation: null,
-        };
-        const agg = createAggregate(project.name, project.path, agentData);
         await agg.spawnAgent({ trackerIssue: issue.data });
 
         // Post "Agent started" comment only on external trackers (Linear etc.)
@@ -183,6 +207,10 @@ async function processTrackerIssue(
         log(`SPAWN ${issueId}: ✓ success`);
       } catch (spawnErr) {
         log(`SPAWN ${issueId}: ✗ FAILED — ${spawnErr}`);
+        agg.setError(String(spawnErr).substring(0, 300));
+        try {
+          await issue.addComment(`❌ Agent spawn failed: ${String(spawnErr).substring(0, 300)}`);
+        } catch {}
         return;
       }
 
@@ -203,27 +231,31 @@ async function processTrackerIssue(
         return;
       }
       log(`RE-SPAWN ${issueId}: In Progress but no agent record`);
+      const now = new Date().toISOString();
+      const agentData: store.AgentData = {
+        issueId,
+        title: issueId,
+        status: "SPAWNING" as const,
+        branch: `agent/${issueId}`,
+        servicesEnabled: false,
+        spawned: false,
+        previewed: false,
+        notified: false,
+        createdAt: now,
+        updatedAt: now,
+        state: defaultAgentState(`agent/${issueId}`),
+        currentOperation: null,
+      };
+      const respawnAgg = createAggregate(project.name, project.path, agentData);
       try {
-        const now = new Date().toISOString();
-        const agentData: store.AgentData = {
-          issueId,
-          title: issueId,
-          status: "SPAWNING" as const,
-          branch: `agent/${issueId}`,
-          servicesEnabled: false,
-          spawned: false,
-          previewed: false,
-          notified: false,
-          createdAt: now,
-          updatedAt: now,
-          state: defaultAgentState(`agent/${issueId}`),
-          currentOperation: null,
-        };
-        const agg = createAggregate(project.name, project.path, agentData);
-        await agg.spawnAgent({ trackerIssue: issue.data });
+        await respawnAgg.spawnAgent({ trackerIssue: issue.data });
         log(`RE-SPAWN ${issueId}: ✓ success`);
       } catch (spawnErr) {
         log(`RE-SPAWN ${issueId}: ✗ FAILED — ${spawnErr}`);
+        respawnAgg.setError(String(spawnErr).substring(0, 300));
+        try {
+          await issue.addComment(`❌ Agent re-spawn failed: ${String(spawnErr).substring(0, 300)}`);
+        } catch {}
       }
       currentAgent = store.getAgent(project.path, issueId);
     }
@@ -274,7 +306,9 @@ async function processTrackerIssue(
               log(`AUTO-MERGE ${issueId}: ✓ success`);
             } catch (mergeErr) {
               log(`AUTO-MERGE ${issueId}: ✗ FAILED — ${mergeErr}`);
-              // Fall back to normal in_review flow
+              try {
+                await issue.addComment(`⚠️ Auto-merge failed: ${String(mergeErr).substring(0, 300)}\n\nAgent moved to review — merge manually.`);
+              } catch {}
               await issue.transitionTo("in_review");
             }
           } else {

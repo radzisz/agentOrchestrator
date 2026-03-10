@@ -1,6 +1,6 @@
 import { eventBus, type EventMap } from "./event-bus";
 
-interface FeedEvent {
+export interface FeedEvent {
   id: number;
   type: string;
   data: any;

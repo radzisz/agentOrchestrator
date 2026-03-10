@@ -90,6 +90,7 @@ function makePorts(slot = 10): PortInfo {
   const base = 40000 + slot * 6;
   return {
     slot,
+    all: [base, base + 1, base + 2, base + 3, base + 4, base + 5],
     frontend: [base, base + 1, base + 2],
     backend: [base + 3, base + 4, base + 5],
   };
@@ -116,10 +117,15 @@ function makeTrackerIssue(overrides: Partial<TrackerIssue> = {}): TrackerIssue {
     title: "Fix login bug",
     description: "Users cannot log in when password contains special chars",
     priority: 2,
+    phase: "in_progress",
     labels: ["bug", "auth"],
     rawState: "In Progress",
-    source: "linear",
+    createdBy: null,
     createdAt: "2026-03-01T10:00:00Z",
+    url: null,
+    source: "linear",
+    comments: [],
+    _raw: null,
     ...overrides,
   };
 }
@@ -134,7 +140,7 @@ function makeDeps(opts?: {
     appendMessage: (pp, id, role, text) => diskStore.appendMessage(pp, id, role, text),
     deleteMessage: (pp, id, index) => diskStore.deleteMessage(pp, id, index),
     getAIRules: () => opts?.globalRules || [],
-    getProjectConfig: () =>
+    getProjectConfig: (): Record<string, string> =>
       opts?.projectRules
         ? { AI_RULES: JSON.stringify(opts.projectRules) }
         : {},

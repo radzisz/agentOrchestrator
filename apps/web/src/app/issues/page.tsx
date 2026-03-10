@@ -34,7 +34,10 @@ interface IssueRow {
   description: string | null;
   phase: string;
   labels: string[];
+  source: string;
+  createdBy: string | null;
   createdAt: string;
+  url: string | null;
   commentCount: number;
 }
 
@@ -79,6 +82,7 @@ export default function IssuesPage() {
   const [search, setSearch] = useState("");
   const [phaseFilter, setPhaseFilter] = useState("open");
   const [projectFilter, setProjectFilter] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
@@ -107,6 +111,7 @@ export default function IssuesPage() {
     if (search) params.set("q", search);
     if (phaseFilter) params.set("phase", phaseFilter);
     if (projectFilter) params.set("project", projectFilter);
+    if (sourceFilter) params.set("source", sourceFilter);
     try {
       const resp = await fetch(`/api/issues?${params}`);
       if (resp.ok) setIssues(await resp.json());
@@ -115,7 +120,7 @@ export default function IssuesPage() {
     } finally {
       setLoading(false);
     }
-  }, [search, phaseFilter, projectFilter]);
+  }, [search, phaseFilter, projectFilter, sourceFilter]);
 
   useEffect(() => {
     fetch("/api/projects")
@@ -241,6 +246,17 @@ export default function IssuesPage() {
           </select>
 
           <select
+            value={sourceFilter}
+            onChange={(e) => setSourceFilter(e.target.value)}
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+          >
+            <option value="">All sources</option>
+            <option value="local">Local</option>
+            <option value="linear">Linear</option>
+            <option value="sentry">Sentry</option>
+          </select>
+
+          <select
             value={projectFilter}
             onChange={(e) => setProjectFilter(e.target.value)}
             className="h-9 rounded-md border border-input bg-background px-3 text-sm"
@@ -276,12 +292,24 @@ export default function IssuesPage() {
                 <div
                   key={issue.id}
                   className="flex items-start gap-3 px-4 py-3 hover:bg-muted/50 transition-colors cursor-pointer"
-                  onClick={() => openEdit(issue)}
+                  onClick={() => issue.source === "local" ? openEdit(issue) : issue.url && window.open(issue.url, "_blank")}
                 >
                   <div className="mt-0.5">{phaseIcon[issue.phase]}</div>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-xs font-mono text-muted-foreground shrink-0">{issue.identifier}</span>
+                      {issue.url ? (
+                        <a
+                          href={issue.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs font-mono text-muted-foreground shrink-0 hover:text-foreground hover:underline"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {issue.identifier}
+                        </a>
+                      ) : (
+                        <span className="text-xs font-mono text-muted-foreground shrink-0">{issue.identifier}</span>
+                      )}
                       <span className="font-medium truncate">{plainTitle || issue.title}</span>
                     </div>
                     {plainDesc && (
@@ -310,6 +338,9 @@ export default function IssuesPage() {
                     )}
                     <div className="flex items-center gap-2 mt-1">
                       <span className="text-[11px] text-muted-foreground">{issue.projectName}</span>
+                      {issue.source && issue.source !== "local" && (
+                        <Badge variant="secondary" className="text-[10px] h-4 px-1.5">{issue.source}</Badge>
+                      )}
                       {issue.labels.map((l) => (
                         <Badge key={l} variant="outline" className="text-[10px] h-4 px-1.5">{l}</Badge>
                       ))}
@@ -328,14 +359,16 @@ export default function IssuesPage() {
                     <span className="text-xs text-muted-foreground">
                       {new Date(issue.createdAt).toLocaleDateString()}
                     </span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
-                      onClick={(e) => { e.stopPropagation(); setDeleteTarget(issue); }}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                    {issue.source === "local" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+                        onClick={(e) => { e.stopPropagation(); setDeleteTarget(issue); }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
                   </div>
                 </div>
               );

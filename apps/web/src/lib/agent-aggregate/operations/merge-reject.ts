@@ -2,8 +2,6 @@
 // Merge / Reject / Rebase operations
 // ---------------------------------------------------------------------------
 
-import { existsSync, lstatSync } from "fs";
-import { join } from "path";
 import * as gitSvc from "@/services/git";
 import { eventBus } from "@/lib/event-bus";
 import type { AggregateContext } from "../types";
@@ -11,17 +9,6 @@ import * as containerOps from "./container";
 import * as serviceOps from "./services";
 import * as gitOps from "./git";
 import * as trackerOps from "./tracker";
-
-/** Check if agent is using a git worktree (vs full clone). */
-function isWorktree(agentDir?: string): boolean {
-  if (!agentDir) return false;
-  const dotGit = join(agentDir, ".git");
-  try {
-    return existsSync(dotGit) && lstatSync(dotGit).isFile();
-  } catch {
-    return false;
-  }
-}
 
 /** Rebase agent branch onto default branch. */
 export async function rebase(
@@ -52,11 +39,20 @@ export async function mergeAndClose(
   const closeIssue = opts?.closeIssue ?? true;
 
   if (!opts?.skipMerge) {
-    setProgress("fetching and merging");
-    if (isWorktree(ctx.agent.agentDir)) {
-      mergeResult = await gitOps.mergeWorktree(ctx.agent, ctx.projectPath, ctx.state);
-    } else {
+    setProgress("pushing branch and merging");
+    try {
       mergeResult = await gitOps.mergeRepo(ctx.agent, ctx.projectPath, ctx.state);
+    } catch (mergeErr) {
+      // Abort any in-progress merge in project dir and restore clean state
+      try {
+        const git = (await import("@/lib/cmd")).simpleGit(ctx.projectPath);
+        await git.raw(["merge", "--abort"]).catch(() => {});
+        const defaultBranch = await gitSvc.getDefaultBranch(ctx.projectPath);
+        await git.checkout(defaultBranch).catch(() => {});
+      } catch {}
+      ctx.state.git.op = "idle";
+      ctx.persist();
+      throw mergeErr;
     }
   } else {
     ctx.opLog("mergeAndClose", "skipping merge (branch already merged)");
@@ -95,6 +91,15 @@ export async function mergeAndClose(
 
   ctx.opLog("mergeAndClose", `merged commits=${mergeResult.commits}`);
   eventBus.emit("agent:merged", { agentId: ctx.issueId, issueId: ctx.issueId, branch: ctx.agent.branch || "" });
+
+  // Pull main branch in the host project so it picks up the merged changes
+  try {
+    setProgress("pulling main branch");
+    await gitSvc.pullMainBranch(ctx.projectPath);
+    ctx.opLog("mergeAndClose", "pulled main branch");
+  } catch (err) {
+    ctx.opLog("mergeAndClose", `pull main failed (non-critical): ${err}`);
+  }
 
   // Inline cleanup (cannot call removeAgent — it would deadlock on withLock)
   if (opts?.cleanup) {

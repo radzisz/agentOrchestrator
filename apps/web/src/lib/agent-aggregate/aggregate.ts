@@ -72,6 +72,7 @@ export class AgentAggregate {
       linearStatus: s.linearStatus,
       git: { ...s.git, lastCommit: s.git.lastCommit ? { ...s.git.lastCommit } : null },
       services: JSON.parse(JSON.stringify(s.services)),
+      lastError: s.lastError,
     };
   }
 
@@ -161,23 +162,18 @@ export class AgentAggregate {
     }
   }
 
-  /** Push agent branch to remote if there are unpushed commits and a remote exists. */
+  /** Push agent branch to remote after agent exits. Works for clones and worktrees. */
   private async _autoPush(): Promise<void> {
-    if (!this._agent.agentDir || !this._agent.branch) return;
-
-    // Refresh git state to get accurate ahead/behind
-    const git = await gitOps.checkGit(this._agent, this._state.git, this.projectPath);
-    this._state.git = git;
-    this.persist();
-
-    if (git.aheadBy > 0 && !git.dirty) {
-      try {
-        await gitOps.pushRepo(this._agent, this._state);
-        this.opLog("push", `auto-pushed ${git.aheadBy} commit(s)`);
-      } catch (err) {
-        // Push may fail if no remote — that's fine for local-only repos
-        this.opLog("push", `auto-push skipped: ${err}`);
+    if (!this._agent.branch) return;
+    try {
+      const pushed = await gitOps.pushBranchToRemote(this._agent, this.projectPath);
+      if (pushed) {
+        this.opLog("push", `auto-pushed branch ${this._agent.branch}`);
+      } else {
+        this.opLog("push", `auto-push skipped: no remote available`);
       }
+    } catch (err) {
+      this.opLog("push", `auto-push failed: ${err}`);
     }
   }
 
@@ -230,6 +226,13 @@ export class AgentAggregate {
   markReassigned(): void {
     this._agent.reassigned = true;
     this.persist();
+  }
+
+  /** Mark agent as errored — visible in UI. Lifecycle stays unchanged. */
+  setError(message: string): void {
+    this._state.lastError = message;
+    this.persist();
+    this.opLog("error", message);
   }
 
   /** Clear a stale currentOperation (server crash recovery). */

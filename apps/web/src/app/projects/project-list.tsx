@@ -13,7 +13,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { LayoutGrid, List, Trash2, FolderOpen, AlertTriangle } from "lucide-react";
+import { LayoutGrid, List, Trash2, FolderOpen, AlertTriangle, Star } from "lucide-react";
 
 interface ProjectData {
   name: string;
@@ -27,6 +27,7 @@ interface ProjectData {
 }
 
 const VIEW_KEY = "projects-view";
+const STARRED_KEY = "starred-projects";
 
 function ProjectIcon({ name, size = 24 }: { name: string; size?: number }) {
   const [hasIcon, setHasIcon] = useState(true);
@@ -50,6 +51,7 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
   const [view, setView] = useState<"grid" | "list">("grid");
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [starred, setStarred] = useState<Set<string>>(new Set());
 
   async function confirmDelete() {
     if (!deleteTarget) return;
@@ -68,7 +70,24 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
   useEffect(() => {
     const saved = localStorage.getItem(VIEW_KEY);
     if (saved === "list" || saved === "grid") setView(saved);
+    const savedStars = JSON.parse(localStorage.getItem(STARRED_KEY) || "[]");
+    setStarred(new Set(savedStars));
   }, []);
+
+  function toggleStar(name: string) {
+    setStarred(prev => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      localStorage.setItem(STARRED_KEY, JSON.stringify([...next]));
+      return next;
+    });
+  }
+
+  const sorted = [...projects].sort((a, b) => {
+    const aS = starred.has(a.name) ? 0 : 1;
+    const bS = starred.has(b.name) ? 0 : 1;
+    return aS - bS;
+  });
 
   function toggleView(v: "grid" | "list") {
     setView(v);
@@ -98,7 +117,7 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
 
       {view === "grid" ? (
         <div className="grid grid-cols-2 gap-4">
-          {projects.map((p) => (
+          {sorted.map((p) => (
             <Card
               key={p.name}
               className="cursor-pointer hover:border-foreground/30 transition-colors flex flex-col"
@@ -137,14 +156,24 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
                   </div>
                 </div>
                 <div className="mt-auto pt-3 flex justify-between items-center">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
-                    onClick={(e) => { e.stopPropagation(); setDeleteTarget(p.name); }}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 p-0"
+                      onClick={(e) => { e.stopPropagation(); toggleStar(p.name); }}
+                    >
+                      <Star className={`h-3.5 w-3.5 ${starred.has(p.name) ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground"}`} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+                      onClick={(e) => { e.stopPropagation(); setDeleteTarget(p.name); }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
                   <Button variant="outline" size="sm" asChild>
                     <a href={`/projects/${p.name}`} onClick={(e) => e.stopPropagation()}>Open</a>
                   </Button>
@@ -155,7 +184,7 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
         </div>
       ) : (
         <div className="border rounded-md divide-y">
-          {projects.map((p) => (
+          {sorted.map((p) => (
             <div
               key={p.name}
               className="flex items-center gap-4 px-4 py-3 hover:bg-muted/50 transition-colors cursor-pointer"
@@ -195,6 +224,14 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
                 )}
                 <Button variant="outline" size="sm" asChild>
                   <a href={`/projects/${p.name}`} onClick={(e) => e.stopPropagation()}>Open</a>
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 p-0"
+                  onClick={(e) => { e.stopPropagation(); toggleStar(p.name); }}
+                >
+                  <Star className={`h-3.5 w-3.5 ${starred.has(p.name) ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground"}`} />
                 </Button>
                 <Button
                   variant="ghost"

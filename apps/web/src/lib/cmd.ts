@@ -18,7 +18,13 @@ export interface CmdResult {
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 
-const LOG_DIR = join(process.cwd(), ".cmd-logs");
+// Resolve workspace root (from apps/web or from root)
+const _cmdWsRoot = existsSync(join(process.cwd(), "pnpm-workspace.yaml"))
+  ? process.cwd()
+  : existsSync(join(process.cwd(), "..", "..", "pnpm-workspace.yaml"))
+    ? join(process.cwd(), "..", "..")
+    : process.cwd();
+const LOG_DIR = join(_cmdWsRoot, ".config", "logs");
 let _logReady = false;
 
 function ensureLogDir(): void {
