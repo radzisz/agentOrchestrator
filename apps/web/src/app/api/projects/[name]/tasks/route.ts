@@ -78,7 +78,7 @@ function enrichMeta(projectPath: string, projectName: string, meta: CdmMeta[]): 
     // No refreshAgent() here — that does Docker exec per agent and is too slow for a list endpoint.
     const agg = tryGetAggregate(projectName, m.identifier);
     const storedAgent = store.getAgent(projectPath, m.identifier);
-    const agentId = agg || storedAgent ? m.identifier : null;
+    const agentId = (agg || storedAgent || phase !== "todo") ? m.identifier : null;
     const agentStatus = agg ? agg.uiStatus.status : (storedAgent?.uiStatus?.status || storedAgent?.status || null);
 
     // Override phase from agent's actual UI status for consistency
