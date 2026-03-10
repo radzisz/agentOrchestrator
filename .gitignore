@@ -9,3 +9,8 @@ next-env.d.ts
 .claude/
 .config/
 .10timesdev/
+# 10timesdev orchestrator files
+.10timesdev
+agent-output.log
+.agent-container
+messages.jsonl
