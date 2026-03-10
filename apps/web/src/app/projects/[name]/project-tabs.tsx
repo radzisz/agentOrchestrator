@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { toast } from "sonner";
 import { BranchesPanel } from "./branches-panel";
 import { LocalBranchesPanel } from "./local-branches-panel";
@@ -13,7 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AlertTriangle, Plus, Pencil, Trash2, ArrowUp, ArrowDown } from "lucide-react";
 
-type Tab = "cdm" | "preview" | "integrations" | "rules";
+type Tab = "cdm" | "agents" | "preview" | "integrations" | "rules";
 
 interface AIRule {
   id: string;
@@ -51,7 +52,25 @@ export function ProjectTabs({
   project: ProjectData;
   agents: any[];
 }) {
-  const [tab, setTab] = useState<Tab>("cdm");
+  const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const router = useRouter();
+
+  const TABS: Tab[] = ["cdm", "agents", "preview", "rules", "integrations"];
+  const paramTab = searchParams.get("tab") as Tab | null;
+  const tab: Tab = paramTab && TABS.includes(paramTab) ? paramTab : "cdm";
+
+  const setTab = useCallback((t: Tab) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (t === "cdm") {
+      params.delete("tab");
+    } else {
+      params.set("tab", t);
+    }
+    const qs = params.toString();
+    router.push(`${pathname}${qs ? `?${qs}` : ""}`, { scroll: false });
+  }, [searchParams, pathname, router]);
+
   const [modes, setModes] = useState(project.runtimeModes);
 
   async function toggleMode(mode: "local" | "remote") {
@@ -96,9 +115,9 @@ export function ProjectTabs({
 
         {/* Tabs */}
         <div className="px-6 flex gap-0">
-          {(["cdm", "preview", "rules", "integrations"] as Tab[]).map((t) => {
+          {TABS.map((t) => {
             const needsSetup = t === "integrations" && !project.repoUrl;
-            const label = t === "cdm" ? "Tasks" : t === "preview" ? "Preview" : t === "rules" ? "AI Rules" : "Integrations";
+            const label = t === "cdm" ? "Tasks" : t === "agents" ? "Agents" : t === "preview" ? "Preview" : t === "rules" ? "AI Rules" : "Integrations";
             return (
               <button
                 key={t}
@@ -122,16 +141,16 @@ export function ProjectTabs({
       {/* Tab content */}
       <div className="p-6">
         {tab === "cdm" && (
-          <div className="space-y-6">
-            <CdmTab projectName={project.name} />
-            <LocalBranchesPanel
-              projectName={project.name}
-              linearConfigured={project.trackerConfigured}
-              linearTeamKey={project.trackerTeamKey}
-              linearLabel={project.trackerLabel}
-              githubConfigured={false}
-            />
-          </div>
+          <CdmTab projectName={project.name} />
+        )}
+        {tab === "agents" && (
+          <LocalBranchesPanel
+            projectName={project.name}
+            linearConfigured={project.trackerConfigured}
+            linearTeamKey={project.trackerTeamKey}
+            linearLabel={project.trackerLabel}
+            githubConfigured={false}
+          />
         )}
         {tab === "preview" && (
           <PreviewTab

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { GitBranch, Bot, Plus, GitFork, Info, Loader2, Container, Search, RefreshCw, ArrowUpDown } from "lucide-react";
+import { GitBranch, Bot, GitFork, Info, Loader2, Container, Search, RefreshCw, ArrowUpDown } from "lucide-react";
 import { ServiceLink } from "@/components/service-link";
 
 // ---------------------------------------------------------------------------
@@ -134,11 +134,10 @@ export function LocalBranchesPanel({
   const [reconciling, setReconciling] = useState<string | null>(null);
 
   // Dialogs
-  const [showRequestChange, setShowRequestChange] = useState(false);
   const [showCheckout, setShowCheckout] = useState(false);
 
   useEffect(() => {
-    loadBranches();
+    loadBranches().then(() => refreshRuntimes());
   }, [projectName]);
 
   // Auto-refresh when any agent is in a transient state (starting, running, closing)
@@ -149,7 +148,7 @@ export function LocalBranchesPanel({
   useEffect(() => {
     // Fast poll (5s) when agents are in transient states, slow poll (30s) otherwise
     // so new agents from dispatcher appear without manual refresh
-    const interval = setInterval(() => loadBranches(), hasTransient ? 5000 : 30000);
+    const interval = setInterval(() => loadBranches().then(() => refreshRuntimes()), hasTransient ? 5000 : 30000);
     return () => clearInterval(interval);
   }, [hasTransient, projectName]);
 
@@ -327,32 +326,14 @@ export function LocalBranchesPanel({
 
   const header = (
     <div className="space-y-2 mb-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Agent Workspaces</h2>
-        <div className="flex items-center gap-1.5">
-          {githubConfigured && (
-            <Button variant="ghost" size="sm" onClick={() => setShowCheckout(true)}>
-              <GitFork className="h-3.5 w-3.5 mr-1.5" />
-              Checkout branch
-            </Button>
-          )}
-          {linearConfigured && (
-            <Button variant="ghost" size="sm" onClick={() => setShowRequestChange(true)}>
-              <Plus className="h-3.5 w-3.5 mr-1.5" />
-              Request change
-            </Button>
-          )}
-          <Button variant="ghost" size="sm" onClick={async () => {
-            await fetch(`/api/projects/${projectName}/refresh`, { method: "POST" });
-            loadBranches();
-          }} disabled={loading}>
-            {loading
-              ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />
-              : <RefreshCw className="h-3.5 w-3.5 mr-1.5" />}
-            Refresh
+      {githubConfigured && (
+        <div className="flex items-center justify-end">
+          <Button variant="ghost" size="sm" onClick={() => setShowCheckout(true)}>
+            <GitFork className="h-3.5 w-3.5 mr-1.5" />
+            Checkout branch
           </Button>
         </div>
-      </div>
+      )}
       {branches.length > 0 && (
         <div className="flex items-center gap-2">
           <div className="relative flex-1 max-w-xs">
@@ -399,6 +380,15 @@ export function LocalBranchesPanel({
               {hideMerged ? `Show ${closedCount} closed` : "Hide closed"}
             </button>
           )}
+
+          <Button variant="ghost" size="sm" className="ml-auto" onClick={async () => {
+            await fetch(`/api/projects/${projectName}/refresh`, { method: "POST" });
+            loadBranches();
+          }} disabled={loading}>
+            {loading
+              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              : <RefreshCw className="h-3.5 w-3.5" />}
+          </Button>
         </div>
       )}
     </div>
@@ -492,16 +482,29 @@ export function LocalBranchesPanel({
                     )}
 
                     {branch.localRuntime && ["STARTING", "RUNNING", "FAILED"].includes(branch.localRuntime.status) && (
-                      <Badge
-                        className={`${
-                          branch.localRuntime.status === "RUNNING" ? "bg-green-500" :
-                          branch.localRuntime.status === "STARTING" ? "bg-yellow-500" :
-                          "bg-red-500"
-                        } text-white border-0 text-[10px] px-1.5`}
-                      >
-                        Preview: {branch.localRuntime.status === "RUNNING" ? "Running" :
-                          branch.localRuntime.status === "STARTING" ? "Starting" : "Failed"}
-                      </Badge>
+                      <>
+                        <Badge
+                          className={`${
+                            branch.localRuntime.status === "RUNNING" ? "bg-green-500" :
+                            branch.localRuntime.status === "STARTING" ? "bg-yellow-500" :
+                            "bg-red-500"
+                          } text-white border-0 text-[10px] px-1.5`}
+                        >
+                          Preview: {branch.localRuntime.status === "RUNNING" ? "Running" :
+                            branch.localRuntime.status === "STARTING" ? "Starting" : "Failed"}
+                        </Badge>
+                        <button
+                          onClick={() => viewLogs(branch.localRuntime!.id)}
+                          className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                            logsOpen === branch.localRuntime.id
+                              ? "bg-accent text-foreground"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                          title="Toggle logs"
+                        >
+                          Logs
+                        </button>
+                      </>
                     )}
 
                     {branch.aheadBy > 0 && (
@@ -538,29 +541,18 @@ export function LocalBranchesPanel({
 
                 {/* Actions */}
                 <div className="flex flex-col items-end gap-1 shrink-0">
-                  {/* Runtime controls */}
-                  {branch.runtimeModes.local && (
-                    <RuntimeControls
-                      runtime={branch.localRuntime}
-                      branch={branch.localRuntime?.branch || `agent/${branch.issueId}`}
-                      busy={busy}
-                      onStart={() => startRuntime(branch.localRuntime?.branch || `agent/${branch.issueId}`)}
-                      onStop={(id) => stopRuntime(id, branch.localRuntime?.branch || `agent/${branch.issueId}`)}
-                      onLogs={(id) => viewLogs(id)}
-                      logsOpen={logsOpen}
-                      projectName={projectName}
-                      onRefresh={refreshRuntimes}
-                      runtimeConfig={branch.runtimeConfig}
-                    />
-                  )}
-                  {branch.agentId && (
-                    <Button variant="default" size="sm" asChild>
-                      <a href={`/projects/${projectName}/agents/${branch.agentId}`}>
-                        <Bot className="h-3.5 w-3.5 mr-1" />
-                        Coding Agent
-                      </a>
-                    </Button>
-                  )}
+                  <RuntimeControls
+                    runtime={branch.localRuntime}
+                    branch={branch.localRuntime?.branch || `agent/${branch.issueId}`}
+                    busy={busy}
+                    onStart={() => startRuntime(branch.localRuntime?.branch || `agent/${branch.issueId}`)}
+                    onStop={(id) => stopRuntime(id, branch.localRuntime?.branch || `agent/${branch.issueId}`)}
+                    onLogs={(id) => viewLogs(id)}
+                    logsOpen={logsOpen}
+                    projectName={projectName}
+                    onRefresh={refreshRuntimes}
+                    runtimeConfig={branch.runtimeConfig}
+                  />
                 </div>
               </div>
 
@@ -583,17 +575,6 @@ export function LocalBranchesPanel({
         linearTeamKey={linearTeamKey}
         linearLabel={linearLabel}
       />
-
-      {/* Request Change dialog */}
-      {showRequestChange && (
-        <RequestChangeDialog
-          projectName={projectName}
-          onClose={() => setShowRequestChange(false)}
-          onCreated={() => {
-            setShowRequestChange(false);
-          }}
-        />
-      )}
 
       {/* Checkout remote branch dialog */}
       {showCheckout && (
@@ -636,7 +617,7 @@ function ConfigSummary({
             {linearTeamKey && (
               <> in team <span className="font-mono font-medium text-foreground">{linearTeamKey}</span></>
             )}.
-            Use <span className="font-medium text-foreground">Request change</span> to create an issue directly from here.
+            Submit new tasks in the <span className="font-medium text-foreground">Tasks</span> tab.
           </p>
         ) : (
           <p>
@@ -644,109 +625,6 @@ function ConfigSummary({
             Configure Linear integration (API Key + Team Key) in the{" "}
             <span className="font-medium text-foreground">Integrations</span> tab to enable automatic dispatching.
           </p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// RequestChangeDialog — creates a Linear issue with the agent label
-// ---------------------------------------------------------------------------
-
-function RequestChangeDialog({
-  projectName,
-  onClose,
-  onCreated,
-}: {
-  projectName: string;
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ issueId: string; message: string } | null>(null);
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!title.trim()) return;
-    setSubmitting(true);
-    setError(null);
-
-    try {
-      const resp = await fetch(`/api/projects/${projectName}/request-change`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: title.trim(), description: description.trim() }),
-      });
-      const data = await resp.json();
-      if (!resp.ok) {
-        setError(data.error || `HTTP ${resp.status}`);
-      } else {
-        setResult(data);
-      }
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-card border rounded-xl p-6 w-full max-w-lg space-y-4">
-        <h2 className="text-lg font-semibold">Request a change</h2>
-        <p className="text-sm text-muted-foreground">
-          Creates a Linear issue with the agent label. The dispatcher will automatically
-          pick it up and spawn an agent to work on it.
-        </p>
-
-        {result ? (
-          <div className="space-y-3">
-            <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3">
-              <p className="text-sm font-medium text-green-400">
-                Created {result.issueId}
-              </p>
-              <p className="text-xs text-muted-foreground mt-1">{result.message}</p>
-            </div>
-            <div className="flex justify-end">
-              <Button onClick={onCreated}>Close</Button>
-            </div>
-          </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="space-y-3">
-            <div>
-              <label className="text-sm font-medium">Title</label>
-              <Input
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="What should be changed?"
-                autoFocus
-              />
-            </div>
-            <div>
-              <label className="text-sm font-medium">Description</label>
-              <textarea
-                className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring min-h-[100px]"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Detailed description of the change (optional but recommended)..."
-              />
-            </div>
-
-            {error && <p className="text-sm text-destructive">{error}</p>}
-
-            <div className="flex gap-2 justify-end pt-2">
-              <Button variant="outline" type="button" onClick={onClose}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={submitting || !title.trim()}>
-                {submitting ? "Creating..." : "Create issue"}
-              </Button>
-            </div>
-          </form>
         )}
       </div>
     </div>

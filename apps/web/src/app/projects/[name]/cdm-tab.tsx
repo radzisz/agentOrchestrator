@@ -1,8 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import Link from "next/link";
-import { ChevronDown, ChevronRight, Play, Trash2, Loader2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Play, Loader2, X } from "lucide-react";
 import { extractImages, stripImages } from "@/lib/markdown-images";
 
 interface TaskStatus {
@@ -15,22 +14,6 @@ interface TaskStatus {
   agentId: string | null;
   agentStatus: string | null;
 }
-
-const PHASE_COLORS: Record<string, string> = {
-  todo: "bg-yellow-500/15 text-yellow-600 dark:text-yellow-400",
-  in_progress: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
-  in_review: "bg-purple-500/15 text-purple-600 dark:text-purple-400",
-  done: "bg-green-500/15 text-green-600 dark:text-green-400",
-  cancelled: "bg-gray-500/15 text-gray-600 dark:text-gray-400",
-};
-
-const PHASE_LABELS: Record<string, string> = {
-  todo: "Todo",
-  in_progress: "Running",
-  in_review: "Review",
-  done: "Done",
-  cancelled: "Cancelled",
-};
 
 // ---------------------------------------------------------------------------
 // Parse content into sections
@@ -129,11 +112,29 @@ export function CdmTab({ projectName }: { projectName: string }) {
   const [submittingIdx, setSubmittingIdx] = useState<number | null>(null);
   const [lastResult, setLastResult] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
-  const [hiddenPhases, setHiddenPhases] = useState<Set<string>>(new Set(["done", "cancelled"]));
   const saveTimerRef = useRef<NodeJS.Timeout | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const contentRef = useRef(content);
   contentRef.current = content;
+
+  // Persist textarea height per project
+  const heightKey = `cdm-textarea-height:${projectName}`;
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const saved = localStorage.getItem(heightKey);
+    if (saved) ta.style.height = saved;
+
+    let debounce: NodeJS.Timeout;
+    const observer = new ResizeObserver(() => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        localStorage.setItem(heightKey, ta.style.height || `${ta.offsetHeight}px`);
+      }, 300);
+    });
+    observer.observe(ta);
+    return () => { observer.disconnect(); clearTimeout(debounce); };
+  }, [heightKey]);
 
   // ---------------------------------------------------------------------------
   // Fetch tasks
@@ -291,41 +292,6 @@ export function CdmTab({ projectName }: { projectName: string }) {
   }
 
   // ---------------------------------------------------------------------------
-  // Delete task
-  // ---------------------------------------------------------------------------
-
-  async function deleteTask(task: TaskStatus) {
-    try {
-      await fetch(`/api/projects/${projectName}/tasks`, {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ identifier: task.identifier }),
-      });
-      const data = await fetch(`/api/projects/${projectName}/tasks`).then((r) => r.json());
-      setContent(data.content || "");
-      setTasks(data.tasks || []);
-    } catch {
-      // ignore
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Merge task
-  // ---------------------------------------------------------------------------
-
-  async function mergeTask(task: TaskStatus) {
-    try {
-      await fetch(`/api/agents/${task.identifier}/merge`, {
-        method: "POST",
-      });
-      const data = await fetch(`/api/projects/${projectName}/tasks`).then((r) => r.json());
-      setTasks(data.tasks || []);
-    } catch {
-      // ignore
-    }
-  }
-
-  // ---------------------------------------------------------------------------
   // Collapse toggle
   // ---------------------------------------------------------------------------
 
@@ -420,61 +386,6 @@ export function CdmTab({ projectName }: { projectName: string }) {
         </div>
       )}
 
-      {/* Submitted tasks */}
-      {tasks.length > 0 && (() => {
-        const filteredTasks = tasks.filter((t) => !hiddenPhases.has(t.phase));
-        const hiddenCount = tasks.length - filteredTasks.length;
-        const phases = ["todo", "in_progress", "in_review", "done", "cancelled"] as const;
-
-        return (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-medium text-muted-foreground">Agents</h3>
-              <div className="flex items-center gap-1">
-                {phases.map((p) => {
-                  const count = tasks.filter((t) => t.phase === p).length;
-                  if (count === 0) return null;
-                  const active = !hiddenPhases.has(p);
-                  return (
-                    <button
-                      key={p}
-                      onClick={() => setHiddenPhases((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(p)) next.delete(p); else next.add(p);
-                        return next;
-                      })}
-                      className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                        active
-                          ? PHASE_COLORS[p]
-                          : "bg-muted text-muted-foreground/50"
-                      }`}
-                      title={`${active ? "Hide" : "Show"} ${PHASE_LABELS[p]} (${count})`}
-                    >
-                      {PHASE_LABELS[p]} {count}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-            {filteredTasks.map((task) => (
-              <SubmittedCard
-                key={task.identifier}
-                task={task}
-                projectName={projectName}
-                isCollapsed={collapsed.has(1000 + tasks.indexOf(task))}
-                onToggle={() => toggleCollapse(1000 + tasks.indexOf(task))}
-                onDelete={deleteTask}
-                onMerge={mergeTask}
-              />
-            ))}
-            {filteredTasks.length === 0 && hiddenCount > 0 && (
-              <p className="text-xs text-muted-foreground text-center py-2">
-                {hiddenCount} hidden — click filters above to show
-              </p>
-            )}
-          </div>
-        );
-      })()}
     </div>
   );
 }
@@ -632,82 +543,3 @@ function ReadyCard({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Submitted Card — task is running / done
-// ---------------------------------------------------------------------------
-
-function SubmittedCard({
-  task,
-  projectName,
-  isCollapsed,
-  onToggle,
-  onDelete,
-  onMerge,
-}: {
-  task: TaskStatus;
-  projectName: string;
-  isCollapsed: boolean;
-  onToggle: () => void;
-  onDelete: (task: TaskStatus) => void;
-  onMerge: (task: TaskStatus) => void;
-}) {
-  const colorClass = PHASE_COLORS[task.phase] || PHASE_COLORS.todo;
-  const phaseLabel = PHASE_LABELS[task.phase] || task.phase;
-  const isDone = task.phase === "done" || task.phase === "cancelled";
-
-  return (
-    <div className={`border border-border rounded-lg overflow-hidden ${isDone ? "opacity-50" : ""}`}>
-      <div className="flex items-center justify-between overflow-hidden">
-        <button
-          onClick={onToggle}
-          className="flex-1 flex items-start gap-2 px-3 py-2 text-left hover:bg-muted/30 rounded-l-lg transition-colors min-w-0"
-        >
-          <span className="shrink-0 mt-0.5">{isCollapsed ? <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />}</span>
-          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium shrink-0 ${colorClass}`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${
-              task.phase === "in_progress" ? "bg-blue-500 animate-pulse" :
-              task.phase === "done" ? "bg-green-500" :
-              task.phase === "in_review" ? "bg-purple-500" :
-              task.phase === "cancelled" ? "bg-gray-500" : "bg-yellow-500"
-            }`} />
-            {phaseLabel}
-          </span>
-          <span className="text-xs text-muted-foreground shrink-0">{task.identifier}</span>
-          <span className="text-sm break-words line-clamp-2 min-w-0">{task.title}</span>
-        </button>
-        <div className="flex items-center gap-0.5 px-1 shrink-0">
-          {task.agentId && (
-            <Link
-              href={`/projects/${projectName}/agents/${task.agentId}`}
-              className="px-2 py-1 text-xs text-blue-500 hover:text-blue-400 hover:underline"
-            >
-              View
-            </Link>
-          )}
-          {(task.phase === "in_review" || task.phase === "done") && task.agentId && (
-            <button
-              onClick={() => onMerge(task)}
-              className="px-2 py-1 text-xs bg-green-500/15 text-green-600 dark:text-green-400 rounded hover:bg-green-500/25"
-            >
-              Merge
-            </button>
-          )}
-          {!isDone && (
-            <button
-              onClick={() => onDelete(task)}
-              className="p-1 text-muted-foreground hover:text-red-500 transition-colors"
-              title="Delete"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          )}
-        </div>
-      </div>
-      {!isCollapsed && (
-        <div className="px-3 pb-2 pl-9 text-xs text-muted-foreground">
-          Submitted {new Date(task.submittedAt).toLocaleString("pl-PL", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
-        </div>
-      )}
-    </div>
-  );
-}
