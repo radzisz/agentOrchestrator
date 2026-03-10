@@ -17,6 +17,7 @@ import {
   Maximize2,
   MessageSquare,
   Minimize2,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Send,
@@ -53,6 +54,7 @@ interface ReviewComment {
   file: string;
   selectedText: string;
   note: string;
+  lineNo?: number | null;
 }
 
 const statusColors: Record<string, string> = {
@@ -245,13 +247,14 @@ function formatReview(
     for (const [file, fileComments] of Object.entries(byFile)) {
       parts.push(`**${file}**\n`);
       for (const c of fileComments) {
+        const lineLabel = c.lineNo ? ` (line ${c.lineNo})` : "";
         const quoted = c.selectedText
           .split("\n")
           .map((l) => `> ${l}`)
           .join("\n");
         parts.push(quoted);
         parts.push("");
-        parts.push(c.note);
+        parts.push(`${c.note}${lineLabel}`);
         parts.push("");
       }
     }
@@ -449,12 +452,13 @@ function buildSplitRows(parsed: ParsedLine[]): SplitRow[] {
 function useSelectionComment(
   containerRef: React.RefObject<HTMLElement | null>,
   file: string,
-  onAddComment: (file: string, selectedText: string, note: string) => void
+  onAddComment: (file: string, selectedText: string, note: string, lineNo: number | null) => void
 ) {
   const [popover, setPopover] = useState<{
     x: number;
     y: number;
     selectedText: string;
+    lineNo: number | null;
   } | null>(null);
 
   function handleMouseUp() {
@@ -463,10 +467,23 @@ function useSelectionComment(
     const text = sel.toString().trim();
     if (!text || !containerRef.current.contains(sel.anchorNode)) return;
     const rect = sel.getRangeAt(0).getBoundingClientRect();
+
+    // Walk up from anchor node to find the row div with data-line-new
+    let lineNo: number | null = null;
+    let node: Node | null = sel.anchorNode;
+    while (node && node !== containerRef.current) {
+      if (node instanceof HTMLElement) {
+        const ln = node.dataset.lineNew ?? node.dataset.lineOld;
+        if (ln) { lineNo = parseInt(ln, 10); break; }
+      }
+      node = node.parentNode;
+    }
+
     setPopover({
       x: Math.min(rect.left, window.innerWidth - 300),
       y: rect.bottom + 4,
       selectedText: text,
+      lineNo,
     });
   }
 
@@ -476,7 +493,7 @@ function useSelectionComment(
       <FloatingComment
         position={{ x: popover.x, y: popover.y }}
         onSave={(note) => {
-          onAddComment(file, popover.selectedText, note);
+          onAddComment(file, popover.selectedText, note, popover.lineNo);
           setPopover(null);
           window.getSelection()?.removeAllRanges();
         }}
@@ -520,7 +537,7 @@ function DiffView({
   diff: string;
   file: string;
   comments: ReviewComment[];
-  onAddComment: (file: string, selectedText: string, note: string) => void;
+  onAddComment: (file: string, selectedText: string, note: string, lineNo: number | null) => void;
   mode: DiffMode;
 }) {
   const containerRef = useRef<HTMLElement>(null);
@@ -550,7 +567,7 @@ function DiffView({
             onMouseUp={handleMouseUp}
           >
             {parsed.map((line, i) => (
-              <div key={i} className={`px-3 py-0.5 flex ${lineClass(line.type)}`}>
+              <div key={i} className={`px-3 py-0.5 flex ${lineClass(line.type)}`} data-line-new={line.newLineNo ?? undefined} data-line-old={line.oldLineNo ?? undefined}>
                 <span className="w-8 shrink-0 text-right pr-2 text-muted-foreground/30 select-none">
                   {line.oldLineNo ?? ""}
                 </span>
@@ -602,6 +619,8 @@ function DiffView({
                           : "text-foreground/80"
                         : "bg-muted/20"
                     }`}
+                    data-line-old={row.left?.oldLineNo ?? undefined}
+                    data-line-new={row.left?.newLineNo ?? undefined}
                   >
                     <span className="w-8 shrink-0 text-right pr-2 text-muted-foreground/30 select-none">
                       {row.left?.oldLineNo ?? ""}
@@ -618,6 +637,8 @@ function DiffView({
                           : "text-foreground/80"
                         : "bg-muted/20"
                     }`}
+                    data-line-new={row.right?.newLineNo ?? undefined}
+                    data-line-old={row.right?.oldLineNo ?? undefined}
                   >
                     <span className="w-8 shrink-0 text-right pr-2 text-muted-foreground/30 select-none">
                       {row.right?.newLineNo ?? ""}
@@ -656,7 +677,7 @@ function DiffView({
           onMouseUp={handleMouseUp}
         >
           {filtered.map((line, i) => (
-            <div key={i} className={`px-3 py-0.5 flex ${lineClass(line.type)}`}>
+            <div key={i} className={`px-3 py-0.5 flex ${lineClass(line.type)}`} data-line-new={line.newLineNo ?? undefined} data-line-old={line.oldLineNo ?? undefined}>
               <span className="w-8 shrink-0 text-right pr-2 text-muted-foreground/30 select-none">
                 {(isSource ? line.oldLineNo : line.newLineNo) ?? ""}
               </span>
@@ -867,9 +888,42 @@ export function CodeTab({
   });
   const [submitting, setSubmitting] = useState(false);
   const [reviewSent, setReviewSent] = useState(false);
+  const [editingCommentIdx, setEditingCommentIdx] = useState<number | null>(null);
+  const [editingNote, setEditingNote] = useState("");
+  const [allCommentsOpen, setAllCommentsOpen] = useState(false);
+  const [commentsFilter, setCommentsFilter] = useState<"file" | "all">("file");
 
   const canSend = comments.length > 0 || generalComment.trim().length > 0;
   const reviewBarRef = useRef<HTMLDivElement>(null);
+  const diffAreaRef = useRef<HTMLDivElement>(null);
+
+  function handleUpdateComment(idx: number, newNote: string) {
+    if (!newNote.trim()) return;
+    setComments(prev => prev.map((c, i) => i === idx ? { ...c, note: newNote } : c));
+    setEditingCommentIdx(null);
+  }
+
+  function scrollToLine(lineNo: number) {
+    if (!diffAreaRef.current) return;
+    const el = diffAreaRef.current.querySelector(`[data-line-new="${lineNo}"]`) as HTMLElement | null;
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("ring-2", "ring-yellow-500/60");
+      setTimeout(() => el.classList.remove("ring-2", "ring-yellow-500/60"), 2000);
+    }
+  }
+
+  function navigateToComment(c: ReviewComment) {
+    if (selectedFile !== c.file) {
+      selectFile(c.file);
+      // scroll after file loads — use a small delay for DOM to update
+      if (c.lineNo) {
+        setTimeout(() => scrollToLine(c.lineNo!), 300);
+      }
+    } else if (c.lineNo) {
+      scrollToLine(c.lineNo);
+    }
+  }
 
   // Persist review state to sessionStorage
   useEffect(() => {
@@ -881,6 +935,11 @@ export function CodeTab({
   useEffect(() => {
     try { sessionStorage.setItem(`${storageKey}-general`, generalComment); } catch {}
   }, [generalComment, storageKey]);
+
+  // Auto-expand "All comments" when there are comments and no file is selected
+  useEffect(() => {
+    if (comments.length > 0 && !selectedFile) setAllCommentsOpen(true);
+  }, [comments.length, selectedFile]);
 
   // Are all commits selected? (= show full diff, no filter)
   const allSelected =
@@ -1026,8 +1085,8 @@ export function CodeTab({
     }
   }
 
-  function handleAddComment(file: string, selectedText: string, note: string) {
-    setComments((prev) => [...prev, { file, selectedText, note }]);
+  function handleAddComment(file: string, selectedText: string, note: string, lineNo: number | null = null) {
+    setComments((prev) => [...prev, { file, selectedText, note, lineNo }]);
     setReviewSent(false);
   }
 
@@ -1420,7 +1479,7 @@ export function CodeTab({
                 </div>
 
                 {/* Diff */}
-                <div className="flex-1 overflow-auto code-scroll">
+                <div ref={diffAreaRef} className="flex-1 overflow-auto code-scroll">
                   <DiffView
                     diff={(fullFile ? fullDiffs[selectedFile] : diffs[selectedFile]) || ""}
                     file={selectedFile}
@@ -1430,35 +1489,157 @@ export function CodeTab({
                   />
                 </div>
 
-                {/* Inline comments for this file */}
-                {fileComments.length > 0 && (
-                  <div className="border-t bg-yellow-500/5 max-h-40 overflow-y-auto shrink-0">
-                    {fileComments.map((c) => {
-                      const globalIdx = comments.indexOf(c);
-                      return (
-                        <div
-                          key={globalIdx}
-                          className="px-3 py-1.5 border-b border-yellow-500/10 flex items-start gap-2 text-xs"
-                        >
-                          <MessageSquare className="h-3 w-3 text-yellow-600 shrink-0 mt-0.5" />
-                          <div className="flex-1 min-w-0">
-                            <pre className="text-[10px] text-muted-foreground font-mono truncate">
-                              {c.selectedText.split("\n")[0]}
-                            </pre>
-                            <p className="text-foreground/90 mt-0.5">{c.note}</p>
-                          </div>
-                          <button
-                            onClick={() => handleRemoveComment(globalIdx)}
-                            className="text-muted-foreground hover:text-destructive shrink-0"
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
               </>
+            )}
+
+            {/* Comments panel with file/all toggle */}
+            {comments.length > 0 && (
+              <div className="border-t shrink-0">
+                <div className="flex items-center justify-between px-3 py-1.5">
+                  <button
+                    onClick={() => setAllCommentsOpen(prev => !prev)}
+                    className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    <ChevronRight className={`h-3 w-3 transition-transform ${allCommentsOpen ? "rotate-90" : ""}`} />
+                    Comments ({commentsFilter === "all" ? comments.length : `${fileComments.length}/${comments.length}`})
+                  </button>
+                  <div className="flex items-center bg-muted/50 rounded p-0.5 text-[10px]">
+                    <button
+                      onClick={() => setCommentsFilter("file")}
+                      className={`px-2 py-0.5 rounded transition-colors ${
+                        commentsFilter === "file"
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      This file
+                    </button>
+                    <button
+                      onClick={() => setCommentsFilter("all")}
+                      className={`px-2 py-0.5 rounded transition-colors ${
+                        commentsFilter === "all"
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      All files
+                    </button>
+                  </div>
+                </div>
+                {allCommentsOpen && (() => {
+                  const visibleComments: { comment: ReviewComment; globalIdx: number; showFileHeader: boolean }[] = [];
+                  if (commentsFilter === "file") {
+                    fileComments.forEach((c) => {
+                      visibleComments.push({ comment: c, globalIdx: comments.indexOf(c), showFileHeader: false });
+                    });
+                  } else {
+                    const byFile: Record<string, { comment: ReviewComment; globalIdx: number }[]> = {};
+                    const fileOrder: string[] = [];
+                    comments.forEach((c, i) => {
+                      if (!byFile[c.file]) { byFile[c.file] = []; fileOrder.push(c.file); }
+                      byFile[c.file].push({ comment: c, globalIdx: i });
+                    });
+                    for (const file of fileOrder) {
+                      byFile[file].forEach((item, i) => {
+                        visibleComments.push({ ...item, showFileHeader: i === 0 });
+                      });
+                    }
+                  }
+
+                  if (visibleComments.length === 0) {
+                    return (
+                      <div className="px-3 py-2 text-xs text-muted-foreground italic">
+                        No comments for this file
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div className="max-h-48 overflow-y-auto bg-muted/10">
+                      {visibleComments.map(({ comment: c, globalIdx, showFileHeader }) => {
+                        const isEditing = editingCommentIdx === globalIdx;
+                        return (
+                          <div key={globalIdx}>
+                            {showFileHeader && (
+                              <button
+                                onClick={() => selectFile(c.file)}
+                                className="w-full text-left px-3 py-1 text-[11px] font-medium text-blue-400 hover:text-blue-300 hover:bg-muted/20 transition-colors flex items-center gap-1"
+                              >
+                                <FileCode className="h-3 w-3 shrink-0" />
+                                {c.file}
+                              </button>
+                            )}
+                            <div className={`px-3 ${showFileHeader ? "pl-7" : "pl-3"} py-1 border-b border-border/10 flex items-start gap-2 text-xs`}>
+                              <button
+                                onClick={() => navigateToComment(c)}
+                                className="shrink-0 mt-0.5 flex items-center gap-0.5 text-yellow-600 hover:text-yellow-400 transition-colors"
+                                title={c.lineNo ? `Go to line ${c.lineNo}` : "Go to file"}
+                              >
+                                <MessageSquare className="h-3 w-3" />
+                                {c.lineNo && (
+                                  <span className="text-[9px] font-mono text-muted-foreground">:{c.lineNo}</span>
+                                )}
+                              </button>
+                              <div className="flex-1 min-w-0">
+                                <pre className="text-[10px] text-muted-foreground font-mono truncate">
+                                  {c.selectedText.split("\n")[0]}
+                                </pre>
+                                {isEditing ? (
+                                  <div className="mt-0.5 flex items-center gap-1">
+                                    <input
+                                      autoFocus
+                                      className="flex-1 bg-background border rounded px-1.5 py-0.5 text-xs text-foreground"
+                                      value={editingNote}
+                                      onChange={(e) => setEditingNote(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") handleUpdateComment(globalIdx, editingNote);
+                                        if (e.key === "Escape") setEditingCommentIdx(null);
+                                      }}
+                                    />
+                                    <button
+                                      onClick={() => handleUpdateComment(globalIdx, editingNote)}
+                                      className="text-green-500 hover:text-green-400 shrink-0"
+                                    >
+                                      <Check className="h-3 w-3" />
+                                    </button>
+                                    <button
+                                      onClick={() => setEditingCommentIdx(null)}
+                                      className="text-muted-foreground hover:text-foreground shrink-0"
+                                    >
+                                      <X className="h-3 w-3" />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <p className="text-foreground/90 mt-0.5">{c.note}</p>
+                                )}
+                              </div>
+                              {!isEditing && (
+                                <div className="flex items-center gap-0.5 shrink-0">
+                                  <button
+                                    onClick={() => {
+                                      setEditingCommentIdx(globalIdx);
+                                      setEditingNote(c.note);
+                                    }}
+                                    className="text-muted-foreground hover:text-foreground"
+                                  >
+                                    <Pencil className="h-3 w-3" />
+                                  </button>
+                                  <button
+                                    onClick={() => handleRemoveComment(globalIdx)}
+                                    className="text-muted-foreground hover:text-destructive"
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
             )}
 
             {/* Review bar — bottom of right panel */}
@@ -1470,9 +1651,12 @@ export function CodeTab({
                     onChange={(e) => {
                       setGeneralComment(e.target.value);
                       setReviewSent(false);
+                      // Auto-resize: reset then set to scrollHeight
+                      e.target.style.height = "auto";
+                      e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
                     }}
                     placeholder="General feedback — not tied to specific code"
-                    className="text-sm min-h-[36px] max-h-[80px] resize-y"
+                    className="text-sm min-h-[36px] max-h-[160px] resize-none overflow-y-auto"
                     rows={1}
                   />
                 </div>
