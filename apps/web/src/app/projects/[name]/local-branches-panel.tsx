@@ -328,7 +328,7 @@ export function LocalBranchesPanel({
   const header = (
     <div className="space-y-2 mb-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Local Agent Spaces</h2>
+        <h2 className="text-lg font-semibold">Agent Workspaces</h2>
         <div className="flex items-center gap-1.5">
           {githubConfigured && (
             <Button variant="ghost" size="sm" onClick={() => setShowCheckout(true)}>

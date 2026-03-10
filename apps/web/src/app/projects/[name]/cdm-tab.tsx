@@ -364,7 +364,7 @@ export function CdmTab({ projectName }: { projectName: string }) {
           onChange={(e) => handleChange(e.target.value)}
           onPaste={handlePaste}
           placeholder={`Write tasks here. Use ___ to separate multiple tasks.\n\nFix the login button color\n\nThe button should be blue, not red.\n___\n\nAnother task here...`}
-          className="w-full min-h-[200px] p-4 font-mono text-sm bg-background border border-border rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+          className="w-full min-h-[120px] h-[50vh] p-4 font-mono text-sm bg-background border border-border rounded-lg resize-y focus:outline-none focus:ring-2 focus:ring-ring"
           spellCheck={false}
         />
         <div className="absolute top-2 right-2 flex items-center gap-2">

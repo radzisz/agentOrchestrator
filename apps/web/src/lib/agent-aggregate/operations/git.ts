@@ -542,8 +542,13 @@ export async function setupAgentBranch(agentDir: string, branchName: string): Pr
   await git.addConfig("user.email", "agent@10timesdev.com");
   await git.addConfig("user.name", "10timesdev Agent");
 
-  // Create and checkout agent branch
-  await git.checkoutLocalBranch(branchName);
+  // Create and checkout agent branch (or just checkout if it already exists from a previous attempt)
+  const branches = await git.branch();
+  if (branches.all.includes(branchName)) {
+    await git.checkout(branchName);
+  } else {
+    await git.checkoutLocalBranch(branchName);
+  }
 
   // Commit .gitignore if it has changes
   await commitGitIgnoreIfNeeded(agentDir);

@@ -390,12 +390,12 @@ describe("E2E: Spawn → Agent Work → Outcome", () => {
 
       // Make the agent dir "exist" after clone
       const agentDir = join("/tmp/test-project", ".10timesdev", "agents", "PROJ-1", "git");
-      vi.mocked(docker.execInContainerAsync).mockImplementation(async (_c, _a, opts) => {
+      vi.mocked(docker.execInContainerAsync).mockImplementation(async (_c, _a, opts?) => {
         // After container creation, the agent dir "exists"
         MOCK_DIRS.add(agentDir);
         MOCK_DIRS.add(join(agentDir, ".git"));
         const execId = `exec-${Date.now()}`;
-        mockDockerExecs.set(execId, { onExit: opts.onExit!, onData: opts.onData! });
+        mockDockerExecs.set(execId, { onExit: opts?.onExit!, onData: opts?.onData! });
         return { execId };
       });
 

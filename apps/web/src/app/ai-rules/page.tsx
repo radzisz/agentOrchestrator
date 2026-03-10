@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Plus, Pencil, Trash2, ArrowUp, ArrowDown } from "lucide-react";
 import { toast } from "sonner";
@@ -19,26 +18,45 @@ interface AIRule {
 export default function AIRulesPage() {
   const [rules, setRules] = useState<AIRule[]>([]);
   const [loading, setLoading] = useState(true);
-  const [dirty, setDirty] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formTitle, setFormTitle] = useState("");
   const [formContent, setFormContent] = useState("");
   const [formEnabled, setFormEnabled] = useState(true);
   const [formWhenToUse, setFormWhenToUse] = useState("");
+  const saveCounter = useRef(0);
 
-  async function load() {
-    try {
-      const resp = await fetch("/api/ai-rules");
-      const data = await resp.json();
-      setRules(data.rules || []);
-      setDirty(false);
-    } catch {} finally {
-      setLoading(false);
-    }
+  useEffect(() => {
+    fetch("/api/ai-rules")
+      .then((r) => r.json())
+      .then((data) => setRules(data.rules || []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  function persist(next: AIRule[]) {
+    saveCounter.current++;
+    const snap = saveCounter.current;
+    setTimeout(() => {
+      if (snap !== saveCounter.current) return;
+      fetch("/api/ai-rules", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rules: next }),
+      }).then((r) => {
+        if (r.ok) toast.success("Rules saved");
+        else toast.error("Failed to save rules");
+      }).catch(() => toast.error("Failed to save rules"));
+    }, 500);
   }
 
-  useEffect(() => { load(); }, []);
+  function updateRules(updater: (prev: AIRule[]) => AIRule[]) {
+    setRules((prev) => {
+      const next = updater(prev);
+      persist(next);
+      return next;
+    });
+  }
 
   function resetForm() {
     setShowForm(false);
@@ -54,11 +72,11 @@ export default function AIRulesPage() {
     const nextOrder = rules.length > 0 ? Math.max(...rules.map((r) => r.order)) + 1 : 0;
 
     if (editingId) {
-      setRules((prev) => prev.map((r) =>
+      updateRules((prev) => prev.map((r) =>
         r.id === editingId ? { ...r, title: formTitle, content: formContent, enabled: formEnabled, whenToUse: formWhenToUse } : r
       ));
     } else {
-      setRules((prev) => [...prev, {
+      updateRules((prev) => [...prev, {
         id: crypto.randomUUID(),
         title: formTitle,
         content: formContent,
@@ -67,7 +85,6 @@ export default function AIRulesPage() {
         whenToUse: formWhenToUse,
       }]);
     }
-    setDirty(true);
     resetForm();
   }
 
@@ -88,23 +105,7 @@ export default function AIRulesPage() {
     const tmpOrder = sorted[idx].order;
     sorted[idx] = { ...sorted[idx], order: sorted[target].order };
     sorted[target] = { ...sorted[target], order: tmpOrder };
-    setRules(sorted);
-    setDirty(true);
-  }
-
-  async function handleSave() {
-    try {
-      const resp = await fetch("/api/ai-rules", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rules }),
-      });
-      if (!resp.ok) throw new Error();
-      toast.success("AI rules saved");
-      setDirty(false);
-    } catch {
-      toast.error("Failed to save rules");
-    }
+    updateRules(() => sorted);
   }
 
   if (loading) {
@@ -127,10 +128,7 @@ export default function AIRulesPage() {
             Global rules injected into agent context. Agent decides which to apply based on task and codebase.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {dirty && <Badge variant="outline" className="text-xs border-yellow-500 text-yellow-500">unsaved</Badge>}
-          <span className="text-xs text-muted-foreground">{activeCount} active / {rules.length} total</span>
-        </div>
+        <span className="text-xs text-muted-foreground">{activeCount} active / {rules.length} total</span>
       </div>
 
       <div className="p-6 space-y-4 max-w-3xl">
@@ -173,17 +171,14 @@ export default function AIRulesPage() {
                     role="switch"
                     aria-checked={rule.enabled}
                     className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${rule.enabled ? "bg-primary" : "bg-muted"}`}
-                    onClick={() => {
-                      setRules((prev) => prev.map((r) => r.id === rule.id ? { ...r, enabled: !r.enabled } : r));
-                      setDirty(true);
-                    }}
+                    onClick={() => updateRules((prev) => prev.map((r) => r.id === rule.id ? { ...r, enabled: !r.enabled } : r))}
                   >
                     <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform ${rule.enabled ? "translate-x-4" : "translate-x-0"}`} />
                   </button>
                   <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => handleStartEdit(rule)}>
                     <Pencil className="h-4 w-4" />
                   </Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => { setRules((prev) => prev.filter((r) => r.id !== rule.id)); setDirty(true); }}>
+                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => updateRules((prev) => prev.filter((r) => r.id !== rule.id))}>
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>
@@ -248,14 +243,6 @@ export default function AIRulesPage() {
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => setShowForm(true)}>
               <Plus className="h-4 w-4 mr-2" /> Add Rule
-            </Button>
-          </div>
-        )}
-
-        {rules.length > 0 && (
-          <div className="flex justify-end pt-2">
-            <Button onClick={handleSave} disabled={!dirty}>
-              Save Rules
             </Button>
           </div>
         )}

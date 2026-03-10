@@ -7,6 +7,11 @@ import { ProjectTabs } from "./project-tabs";
 
 export const dynamic = "force-dynamic";
 
+export async function generateMetadata({ params }: { params: Promise<{ name: string }> }) {
+  const { name } = await params;
+  return { title: `10xDev: ${name}` };
+}
+
 /** Build rtenvConfig from legacy per-project Supabase/Netlify fields */
 function buildLegacyRtenvConfig(cfg: Record<string, string>): Record<string, { enabled: boolean; instanceId?: string; projectConfig: Record<string, string> }> {
   const result: Record<string, { enabled: boolean; instanceId?: string; projectConfig: Record<string, string> }> = {};
@@ -62,6 +67,7 @@ export default async function ProjectDetailPage({
         imProviderInstanceId: cfg.IM_PROVIDER_INSTANCE_ID || null,
         imEnabled: cfg.IM_ENABLED !== "false",
         gitWorkMode: cfg.GIT_WORK_MODE || null,
+        aiRules: cfg.AI_RULES ? (() => { try { const p = JSON.parse(cfg.AI_RULES); return Array.isArray(p) ? p : null; } catch { return null; } })() : null,
       }}
       agents={agents.map((a) => ({
         ...a,

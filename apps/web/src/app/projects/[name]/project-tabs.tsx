@@ -1,8 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
-import { SpawnButton } from "./spawn-button";
 import { BranchesPanel } from "./branches-panel";
 import { LocalBranchesPanel } from "./local-branches-panel";
 import { RuntimeConfig, type RuntimeConfigData } from "./runtime-config";
@@ -14,7 +13,16 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AlertTriangle, Plus, Pencil, Trash2, ArrowUp, ArrowDown } from "lucide-react";
 
-type Tab = "cdm" | "local" | "remote" | "integrations" | "rules";
+type Tab = "cdm" | "preview" | "integrations" | "rules";
+
+interface AIRule {
+  id: string;
+  title: string;
+  content: string;
+  enabled: boolean;
+  order: number;
+  whenToUse: string;
+}
 
 interface ProjectData {
   name: string;
@@ -33,6 +41,7 @@ interface ProjectData {
   imProviderInstanceId: string | null;
   imEnabled: boolean;
   gitWorkMode: string | null;
+  aiRules: AIRule[] | null;
 }
 
 export function ProjectTabs({
@@ -76,7 +85,6 @@ export function ProjectTabs({
             </div>
             <p className="text-muted-foreground text-sm">{project.repoPath || project.repoUrl}</p>
           </div>
-          <SpawnButton projectName={project.name} />
         </div>
 
         {!project.hasGit && (
@@ -88,9 +96,9 @@ export function ProjectTabs({
 
         {/* Tabs */}
         <div className="px-6 flex gap-0">
-          {(["cdm", "local", "remote", "rules", "integrations"] as Tab[]).map((t) => {
+          {(["cdm", "preview", "rules", "integrations"] as Tab[]).map((t) => {
             const needsSetup = t === "integrations" && !project.repoUrl;
-            const label = t === "cdm" ? "Tasks" : t === "local" ? "Local" : t === "remote" ? "Remote" : t === "rules" ? "AI Rules" : "Integrations";
+            const label = t === "cdm" ? "Tasks" : t === "preview" ? "Preview" : t === "rules" ? "AI Rules" : "Integrations";
             return (
               <button
                 key={t}
@@ -114,24 +122,27 @@ export function ProjectTabs({
       {/* Tab content */}
       <div className="p-6">
         {tab === "cdm" && (
-          <CdmTab projectName={project.name} />
+          <div className="space-y-6">
+            <CdmTab projectName={project.name} />
+            <LocalBranchesPanel
+              projectName={project.name}
+              linearConfigured={project.trackerConfigured}
+              linearTeamKey={project.trackerTeamKey}
+              linearLabel={project.trackerLabel}
+              githubConfigured={false}
+            />
+          </div>
         )}
-        {tab === "local" && (
-          <LocalTab
+        {tab === "preview" && (
+          <PreviewTab
             project={project}
             modes={modes}
-            onToggle={() => toggleMode("local")}
-          />
-        )}
-        {tab === "remote" && (
-          <RemoteTab
-            project={project}
-            modes={modes}
-            onToggle={() => toggleMode("remote")}
+            onToggleLocal={() => toggleMode("local")}
+            onToggleRemote={() => toggleMode("remote")}
           />
         )}
         {tab === "rules" && (
-          <ProjectAIRules projectName={project.name} />
+          <ProjectAIRules projectName={project.name} initialRules={project.aiRules || []} />
         )}
         {tab === "integrations" && (
           <IntegrationsTab project={project} />
@@ -142,74 +153,34 @@ export function ProjectTabs({
 }
 
 // ---------------------------------------------------------------------------
-// Local Tab
+// Preview Tab (merged Local + Remote)
 // ---------------------------------------------------------------------------
 
-function LocalTab({
+function PreviewTab({
   project,
   modes,
-  onToggle,
+  onToggleLocal,
+  onToggleRemote,
 }: {
   project: ProjectData;
   modes: { local: boolean; remote: boolean };
-  onToggle: () => void;
+  onToggleLocal: () => void;
+  onToggleRemote: () => void;
 }) {
-  const [repoConfigured, setRepoConfigured] = useState(false);
-
-  useEffect(() => {
-    fetch("/api/repo-providers")
-      .then((r) => r.json())
-      .then((data) => {
-        const instances = data.instances || [];
-        if (project.repoProviderInstanceId) {
-          setRepoConfigured(instances.some((i: any) => i.id === project.repoProviderInstanceId));
-        } else {
-          setRepoConfigured(instances.some((i: any) => i.isDefault));
-        }
-      })
-      .catch(() => {});
-  }, [project.repoProviderInstanceId]);
-
   return (
     <div className="space-y-6">
       <RuntimeConfig
         projectName={project.name}
         initialConfig={project.runtimeConfig}
         enabled={modes.local}
-        onToggle={onToggle}
+        onToggle={onToggleLocal}
       />
 
-      <LocalBranchesPanel
-        projectName={project.name}
-        linearConfigured={project.trackerConfigured}
-        linearTeamKey={project.trackerTeamKey}
-        linearLabel={project.trackerLabel}
-        githubConfigured={repoConfigured}
-      />
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Remote Tab
-// ---------------------------------------------------------------------------
-
-function RemoteTab({
-  project,
-  modes,
-  onToggle,
-}: {
-  project: ProjectData;
-  modes: { local: boolean; remote: boolean };
-  onToggle: () => void;
-}) {
-  return (
-    <div className="space-y-6">
       <RemoteConfig
         projectName={project.name}
         initialRtenvConfig={project.rtenvConfig}
         enabled={modes.remote}
-        onToggle={onToggle}
+        onToggle={onToggleRemote}
       />
 
       <BranchesPanel projectName={project.name} runtimeType="REMOTE" />
@@ -654,34 +625,35 @@ function GitWorkModePicker({
 // Project AI Rules
 // ---------------------------------------------------------------------------
 
-interface AIRule {
-  id: string;
-  title: string;
-  content: string;
-  enabled: boolean;
-  order: number;
-  whenToUse: string;
-}
+function ProjectAIRules({ projectName, initialRules }: { projectName: string; initialRules: AIRule[] }) {
+  const [rules, setRules] = useState<AIRule[]>(initialRules);
+  const saveCounter = useRef(0);
 
-function ProjectAIRules({ projectName }: { projectName: string }) {
-  const [rules, setRules] = useState<AIRule[]>([]);
-  const [dirty, setDirty] = useState(false);
+  function updateRules(updater: (prev: AIRule[]) => AIRule[]) {
+    setRules((prev) => {
+      const next = updater(prev);
+      saveCounter.current++;
+      const snap = saveCounter.current;
+      setTimeout(() => {
+        if (snap !== saveCounter.current) return; // debounce
+        fetch(`/api/projects/${projectName}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ aiRules: next }),
+        }).then((r) => {
+          if (r.ok) toast.success("Rules saved");
+          else toast.error("Failed to save rules");
+        }).catch(() => toast.error("Failed to save rules"));
+      }, 500);
+      return next;
+    });
+  }
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formTitle, setFormTitle] = useState("");
   const [formContent, setFormContent] = useState("");
   const [formEnabled, setFormEnabled] = useState(true);
   const [formWhenToUse, setFormWhenToUse] = useState("");
-
-  useEffect(() => {
-    fetch(`/api/projects/${projectName}`)
-      .then((r) => r.json())
-      .then((data) => {
-        const parsed = data.config?.AI_RULES ? JSON.parse(data.config.AI_RULES) : [];
-        setRules(Array.isArray(parsed) ? parsed : []);
-      })
-      .catch(() => {});
-  }, [projectName]);
 
   function resetForm() {
     setShowForm(false);
@@ -697,11 +669,11 @@ function ProjectAIRules({ projectName }: { projectName: string }) {
     const nextOrder = rules.length > 0 ? Math.max(...rules.map((r) => r.order)) + 1 : 0;
 
     if (editingId) {
-      setRules((prev) => prev.map((r) =>
+      updateRules((prev) => prev.map((r) =>
         r.id === editingId ? { ...r, title: formTitle, content: formContent, enabled: formEnabled, whenToUse: formWhenToUse } : r
       ));
     } else {
-      setRules((prev) => [...prev, {
+      updateRules((prev) => [...prev, {
         id: crypto.randomUUID(),
         title: formTitle,
         content: formContent,
@@ -710,7 +682,6 @@ function ProjectAIRules({ projectName }: { projectName: string }) {
         whenToUse: formWhenToUse,
       }]);
     }
-    setDirty(true);
     resetForm();
   }
 
@@ -723,21 +694,6 @@ function ProjectAIRules({ projectName }: { projectName: string }) {
     setShowForm(true);
   }
 
-  async function handleSave() {
-    try {
-      const resp = await fetch(`/api/projects/${projectName}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ aiRules: rules }),
-      });
-      if (!resp.ok) throw new Error();
-      toast.success("Project rules saved");
-      setDirty(false);
-    } catch {
-      toast.error("Failed to save rules");
-    }
-  }
-
   const sorted = [...rules].sort((a, b) => a.order - b.order);
 
   function handleMove(id: string, dir: -1 | 1) {
@@ -748,8 +704,7 @@ function ProjectAIRules({ projectName }: { projectName: string }) {
     const tmpOrder = s[idx].order;
     s[idx] = { ...s[idx], order: s[target].order };
     s[target] = { ...s[target], order: tmpOrder };
-    setRules(s);
-    setDirty(true);
+    updateRules(() => s);
   }
 
   return (
@@ -757,7 +712,6 @@ function ProjectAIRules({ projectName }: { projectName: string }) {
       <CardHeader className="py-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-sm">AI Rules</CardTitle>
-          {dirty && <Badge variant="outline" className="text-[10px] border-yellow-500 text-yellow-500">unsaved</Badge>}
         </div>
         <p className="text-xs text-muted-foreground">Project rules — applied alongside global rules. Agent decides which to apply.</p>
       </CardHeader>
@@ -785,12 +739,12 @@ function ProjectAIRules({ projectName }: { projectName: string }) {
                 role="switch"
                 aria-checked={rule.enabled}
                 className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${rule.enabled ? "bg-primary" : "bg-muted"}`}
-                onClick={() => { setRules((prev) => prev.map((r) => r.id === rule.id ? { ...r, enabled: !r.enabled } : r)); setDirty(true); }}
+                onClick={() => updateRules((prev) => prev.map((r) => r.id === rule.id ? { ...r, enabled: !r.enabled } : r))}
               >
                 <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform ${rule.enabled ? "translate-x-4" : "translate-x-0"}`} />
               </button>
               <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => handleStartEdit(rule)}><Pencil className="h-3.5 w-3.5" /></Button>
-              <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => { setRules((prev) => prev.filter((r) => r.id !== rule.id)); setDirty(true); }}><Trash2 className="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => updateRules((prev) => prev.filter((r) => r.id !== rule.id))}><Trash2 className="h-3.5 w-3.5" /></Button>
             </div>
           </div>
         ))}
@@ -811,11 +765,6 @@ function ProjectAIRules({ projectName }: { projectName: string }) {
           </Button>
         )}
 
-        {rules.length > 0 && (
-          <div className="flex justify-end">
-            <Button size="sm" onClick={handleSave}>Save Rules</Button>
-          </div>
-        )}
       </CardContent>
     </Card>
   );
