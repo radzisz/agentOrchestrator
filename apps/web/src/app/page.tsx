@@ -44,13 +44,13 @@ export default async function Dashboard() {
   }
 
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="sticky top-0 z-10 bg-background px-6 py-3 border-b border-border">
+    <div className="h-full flex flex-col overflow-hidden">
+      <div className="shrink-0 bg-background px-6 py-3 border-b border-border">
         <h1 className="text-2xl font-bold">Dashboard</h1>
       </div>
 
-      <div className="p-6 space-y-6">
-        {/* Stats */}
+      {/* Stats */}
+      <div className="shrink-0 px-6 pt-4 pb-2">
         <div className="grid grid-cols-4 gap-4">
           <Card>
             <CardHeader className="pb-2">
@@ -85,18 +85,21 @@ export default async function Dashboard() {
             </CardContent>
           </Card>
         </div>
+      </div>
 
-        <div className="grid grid-cols-3 gap-6">
-          {/* Requires Attention */}
-          <div className="col-span-2">
+      {/* Two independent scrollable panels */}
+      <div className="flex-1 min-h-0 grid grid-cols-3 gap-6 px-6 pb-4">
+        {/* Requires Attention — own scroll */}
+        <div className="col-span-2 flex flex-col min-h-0">
+          <div className="flex-1 overflow-y-auto min-h-0">
             <DashboardAgents agents={needsAttention} />
           </div>
+        </div>
 
-          {/* Real-time Feed */}
-          <div className="space-y-3">
-            <h2 className="text-lg font-semibold">Activity Feed</h2>
-            <RealTimeFeed />
-          </div>
+        {/* Activity Feed — own scroll */}
+        <div className="flex flex-col min-h-0">
+          <h2 className="text-lg font-semibold shrink-0 pb-2">Activity Feed</h2>
+          <RealTimeFeed />
         </div>
       </div>
     </div>

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
 interface FeedEvent {
@@ -52,38 +53,39 @@ export function RealTimeFeed() {
   };
 
   return (
-    <div className="space-y-2">
-      <div className="space-y-1 max-h-[400px] overflow-auto">
-        {events.length === 0 && (
-          <p className="text-sm text-muted-foreground">No events yet...</p>
-        )}
-        {events.map((event) => (
-          <div
-            key={event.id}
-            className="text-sm p-2 rounded bg-muted/50 flex items-start gap-2"
-          >
-            <span>{eventIcon[event.type] || "📌"}</span>
-            <div className="flex-1 min-w-0">
-              <span className="font-medium">
-                {event.type.replace("agent:", "")}
-              </span>
-              {event.data?.issueId && (
-                <span className="text-muted-foreground ml-1">
-                  {event.data.issueId}
-                </span>
-              )}
-              {event.data?.message && (
-                <p className="text-xs text-muted-foreground truncate">
-                  {event.data.message}
-                </p>
-              )}
-            </div>
-            <span className="text-xs text-muted-foreground whitespace-nowrap">
-              {new Date(event.timestamp).toLocaleTimeString()}
+    <div className="space-y-1 flex-1 overflow-y-auto min-h-0">
+      {events.length === 0 && (
+        <p className="text-sm text-muted-foreground">No events yet...</p>
+      )}
+      {events.map((event) => (
+        <div
+          key={event.id}
+          className="text-sm p-2 rounded bg-muted/50 flex items-start gap-2"
+        >
+          <span>{eventIcon[event.type] || "📌"}</span>
+          <div className="flex-1 min-w-0">
+            <span className="font-medium">
+              {event.type.replace("agent:", "")}
             </span>
+            {event.data?.issueId && (
+              <Link
+                href={`/agents/${event.data.issueId}`}
+                className="ml-1 text-blue-400 hover:text-blue-300 hover:underline transition-colors"
+              >
+                {event.data.issueId}
+              </Link>
+            )}
+            {event.data?.message && (
+              <p className="text-xs text-muted-foreground truncate">
+                {event.data.message}
+              </p>
+            )}
           </div>
-        ))}
-      </div>
+          <span className="text-xs text-muted-foreground whitespace-nowrap">
+            {new Date(event.timestamp).toLocaleTimeString()}
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
