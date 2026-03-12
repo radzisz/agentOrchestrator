@@ -402,6 +402,52 @@ export async function deleteRemoteBranch(
   }
 }
 
+/**
+ * Revert (discard) uncommitted files.
+ * - Tracked modified files → git checkout HEAD -- <file>
+ * - Untracked files (status "??") → git clean -f -- <file>
+ */
+export async function revertFiles(
+  cwd: string,
+  files: string[],
+): Promise<{ ok: boolean; error?: string }> {
+  const tracked: string[] = [];
+  const untracked: string[] = [];
+
+  for (const raw of files) {
+    // porcelain format: "XY path" e.g. " M foo.ts" or "?? bar.ts"
+    const match = raw.match(/^(.{2})\s+(.+)$/);
+    if (!match) continue;
+    const status = match[1];
+    const path = match[2];
+    if (status === "??") {
+      untracked.push(path);
+    } else {
+      tracked.push(path);
+    }
+  }
+
+  if (tracked.length > 0) {
+    const paths = tracked.map((f) => `"${f}"`).join(" ");
+    const r = await cmd.git(`-C "${cwd}" checkout HEAD -- ${paths}`, {
+      source: SRC,
+      timeout: 10_000,
+    });
+    if (!r.ok) return { ok: false, error: r.stderr || "checkout failed" };
+  }
+
+  if (untracked.length > 0) {
+    const paths = untracked.map((f) => `"${f}"`).join(" ");
+    const r = await cmd.git(`-C "${cwd}" clean -f -- ${paths}`, {
+      source: SRC,
+      timeout: 10_000,
+    });
+    if (!r.ok) return { ok: false, error: r.stderr || "clean failed" };
+  }
+
+  return { ok: true };
+}
+
 // ---------------------------------------------------------------------------
 // Internal helper
 // ---------------------------------------------------------------------------
