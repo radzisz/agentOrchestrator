@@ -184,19 +184,20 @@ export function AgentActions({
     }
   }
 
-  async function handleRevertFiles() {
-    if (ignoreSelection.size === 0) return;
+  async function handleRevertFiles(files?: string[]) {
+    const toRevert = files || [...ignoreSelection];
+    if (toRevert.length === 0) return;
     setActionLoading(true);
     try {
       const resp = await fetch(`/api/agents/${agentId}/revert-files`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ files: [...ignoreSelection] }),
+        body: JSON.stringify({ files: toRevert }),
       });
       if (!resp.ok) {
         const data = await resp.json().catch(() => ({}));
         alert(`Revert failed: ${data.error || resp.statusText}`);
-      } else {
+      } else if (!files) {
         setIgnoreSelection(new Set());
       }
       fetchDirty();
@@ -297,7 +298,7 @@ export function AgentActions({
 
       {/* ── Merge Dialog ── */}
       <Dialog open={openDialog === "merge"} onOpenChange={(o) => !o && setOpenDialog(null)}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <GitMerge className="h-5 w-5 text-green-500" />
@@ -323,7 +324,7 @@ export function AgentActions({
               <p className="text-sm text-muted-foreground">
                 Merge is not possible with uncommitted changes. You can send the agent a command to commit first.
               </p>
-              <div className="max-h-32 overflow-auto text-xs font-mono bg-background rounded p-2 border space-y-0.5">
+              <div className="max-h-40 overflow-auto text-xs font-mono bg-background rounded p-2 border space-y-0.5">
                 {dirty.files.map((f, i) => (
                   <label key={i} className="flex items-center gap-2 text-muted-foreground cursor-pointer hover:text-foreground min-w-0">
                     <input
@@ -332,13 +333,22 @@ export function AgentActions({
                       onChange={() => toggleIgnore(f)}
                       className="rounded shrink-0"
                     />
-                    <span className="truncate">{f}</span>
+                    <span className="truncate flex-1">{f}</span>
+                    <button
+                      type="button"
+                      title="Revert this file"
+                      onClick={(e) => { e.preventDefault(); handleRevertFiles([f]); }}
+                      disabled={actionLoading}
+                      className="shrink-0 p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground disabled:opacity-50"
+                    >
+                      <Undo2 className="h-3 w-3" />
+                    </button>
                   </label>
                 ))}
               </div>
               {ignoreSelection.size > 0 && (
                 <div className="flex gap-2 flex-wrap">
-                  <Button size="sm" variant="outline" onClick={handleRevertFiles} disabled={actionLoading}>
+                  <Button size="sm" variant="outline" onClick={() => handleRevertFiles()} disabled={actionLoading}>
                     {actionLoading ? (
                       <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Reverting...</>
                     ) : (
