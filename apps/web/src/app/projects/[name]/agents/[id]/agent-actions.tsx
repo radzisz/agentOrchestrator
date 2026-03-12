@@ -10,7 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { GitMerge, Ban, Trash2, AlertTriangle, Loader2, RotateCcw } from "lucide-react";
+import { GitMerge, Ban, Trash2, AlertTriangle, Loader2, RotateCcw, Undo2 } from "lucide-react";
 
 type DialogType = "merge" | "reject" | "remove" | "restore" | null;
 
@@ -184,6 +184,27 @@ export function AgentActions({
     }
   }
 
+  async function handleRevertFiles() {
+    if (ignoreSelection.size === 0) return;
+    setActionLoading(true);
+    try {
+      const resp = await fetch(`/api/agents/${agentId}/revert-files`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: [...ignoreSelection] }),
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        alert(`Revert failed: ${data.error || resp.statusText}`);
+      } else {
+        setIgnoreSelection(new Set());
+      }
+      fetchDirty();
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
   async function handleDirectCommit() {
     if (!commitMsg.trim()) return;
     setActionLoading(true);
@@ -304,25 +325,34 @@ export function AgentActions({
               </p>
               <div className="max-h-32 overflow-auto text-xs font-mono bg-background rounded p-2 border space-y-0.5">
                 {dirty.files.map((f, i) => (
-                  <label key={i} className="flex items-center gap-2 text-muted-foreground cursor-pointer hover:text-foreground">
+                  <label key={i} className="flex items-center gap-2 text-muted-foreground cursor-pointer hover:text-foreground min-w-0">
                     <input
                       type="checkbox"
                       checked={ignoreSelection.has(f)}
                       onChange={() => toggleIgnore(f)}
-                      className="rounded"
+                      className="rounded shrink-0"
                     />
-                    {f}
+                    <span className="truncate">{f}</span>
                   </label>
                 ))}
               </div>
               {ignoreSelection.size > 0 && (
-                <Button size="sm" variant="outline" onClick={handleGitignoreAndCommit} disabled={actionLoading}>
-                  {actionLoading ? (
-                    <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Adding...</>
-                  ) : (
-                    `Add ${ignoreSelection.size} to .gitignore & commit`
-                  )}
-                </Button>
+                <div className="flex gap-2 flex-wrap">
+                  <Button size="sm" variant="outline" onClick={handleRevertFiles} disabled={actionLoading}>
+                    {actionLoading ? (
+                      <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Reverting...</>
+                    ) : (
+                      <><Undo2 className="h-3.5 w-3.5 mr-1" /> Revert {ignoreSelection.size} file{ignoreSelection.size > 1 ? "s" : ""}</>
+                    )}
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={handleGitignoreAndCommit} disabled={actionLoading}>
+                    {actionLoading ? (
+                      <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Adding...</>
+                    ) : (
+                      `Add ${ignoreSelection.size} to .gitignore & commit`
+                    )}
+                  </Button>
+                </div>
               )}
               <div className="flex gap-2 items-center pt-1">
                 <input
@@ -417,7 +447,7 @@ export function AgentActions({
               </p>
               <div className="max-h-32 overflow-auto text-xs font-mono bg-background rounded p-2 border">
                 {dirty.files.map((f, i) => (
-                  <div key={i} className="text-muted-foreground">{f}</div>
+                  <div key={i} className="text-muted-foreground truncate">{f}</div>
                 ))}
               </div>
             </div>
@@ -479,7 +509,7 @@ export function AgentActions({
               </p>
               <div className="max-h-32 overflow-auto text-xs font-mono bg-background rounded p-2 border">
                 {dirty.files.map((f, i) => (
-                  <div key={i} className="text-muted-foreground">{f}</div>
+                  <div key={i} className="text-muted-foreground truncate">{f}</div>
                 ))}
               </div>
             </div>
