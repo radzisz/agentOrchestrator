@@ -5,7 +5,6 @@ import { createHash } from "crypto";
 import * as store from "@/lib/store";
 import { createLocalIssue, listLocalIssues, deleteLocalIssue } from "@/lib/issue-trackers/local-tracker";
 import { triggerSync } from "@/services/dispatcher";
-import { tryGetAggregate } from "@/lib/agent-aggregate";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -74,12 +73,11 @@ function enrichMeta(projectPath: string, projectName: string, meta: CdmMeta[]): 
     const issue = issueMap.get(m.issueId);
     let phase = issue?.phase || "todo";
 
-    // Use cached aggregate state (updated by onExit callbacks + monitor).
+    // Use persisted agent state — single source of truth (set by saveAgent after every persist).
     // No refreshAgent() here — that does Docker exec per agent and is too slow for a list endpoint.
-    const agg = tryGetAggregate(projectName, m.identifier);
     const storedAgent = store.getAgent(projectPath, m.identifier);
-    const agentId = (agg || storedAgent || phase !== "todo") ? m.identifier : null;
-    const agentStatus = agg ? agg.uiStatus.status : (storedAgent?.uiStatus?.status || storedAgent?.status || null);
+    const agentId = (storedAgent || phase !== "todo") ? m.identifier : null;
+    const agentStatus = storedAgent?.uiStatus?.status || storedAgent?.status || null;
 
     // Override phase from agent's actual UI status for consistency
     // Local tracker phase can be stale (e.g. still "in_progress" when agent already stopped)

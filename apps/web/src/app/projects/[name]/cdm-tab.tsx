@@ -104,7 +104,7 @@ function parseSections(content: string, taskMap: Map<string, TaskStatus>): Secti
 // CdmTab
 // ---------------------------------------------------------------------------
 
-export function CdmTab({ projectName }: { projectName: string }) {
+export function CdmTab({ projectName, onTaskSubmitted }: { projectName: string; onTaskSubmitted?: () => void }) {
   const [content, setContent] = useState("");
   const [tasks, setTasks] = useState<TaskStatus[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -233,6 +233,7 @@ export function CdmTab({ projectName }: { projectName: string }) {
 
       if (result.submitted > 0) {
         setLastResult(`Started ${result.tasks?.join(", ") || result.submitted + " task(s)"}`);
+        onTaskSubmitted?.();
       } else {
         setLastResult("No new tasks to submit");
       }

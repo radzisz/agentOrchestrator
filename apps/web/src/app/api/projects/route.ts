@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { execSync } from "child_process";
-import { existsSync, readFileSync, writeFileSync, appendFileSync } from "fs";
-import { join } from "path";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "fs";
+import { join, dirname } from "path";
 import * as store from "@/lib/store";
+import { simpleGit } from "@/lib/cmd";
 import { getBasePath } from "@/integrations/local-drive";
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,47 @@ export function ensureGitRepo(repoPath: string): boolean {
   }
 }
 
+/** Ensure .gitignore has orchestrator entries. */
+function ensureGitignore(repoPath: string): void {
+  const gitignorePath = join(repoPath, ".gitignore");
+  const ignoreEntries = [".10timesdev/", ".env.10timesdev"];
+  if (existsSync(gitignorePath)) {
+    const existing = readFileSync(gitignorePath, "utf-8");
+    const missing = ignoreEntries.filter((e) => !existing.includes(e));
+    if (missing.length) {
+      appendFileSync(gitignorePath, "\n" + missing.join("\n") + "\n");
+    }
+  }
+}
+
+/**
+ * Clone a git repository using the project's simpleGit wrapper
+ * (which sets GIT_TERMINAL_PROMPT=0 — no system auth popups).
+ * Injects GitHub token when available, same as agent clone logic in git.ts.
+ */
+async function cloneProjectRepo(repoUrl: string, targetPath: string): Promise<void> {
+  const parentDir = dirname(targetPath);
+  if (!existsSync(parentDir)) mkdirSync(parentDir, { recursive: true });
+
+  // Inject GitHub token if available (same logic as git.ts cloneRepo)
+  let cloneUrl = repoUrl;
+  const githubToken = store.getDefaultRepoProviderInstance()?.config?.token;
+  if (githubToken && cloneUrl.startsWith("https://github.com/")) {
+    cloneUrl = cloneUrl.replace(
+      "https://github.com",
+      `https://x-access-token:${githubToken}@github.com`,
+    );
+  }
+
+  await simpleGit().clone(cloneUrl, targetPath, ["--depth", "50"]);
+
+  // Disable credential helper to prevent system prompts on subsequent operations
+  const repoGit = simpleGit(targetPath);
+  await repoGit.addConfig("credential.helper", "");
+
+  ensureGitignore(targetPath);
+}
+
 export interface CreateProjectInput {
   name: string;
   repoPath?: string;
@@ -79,6 +121,7 @@ export interface CreateProjectResult {
   name: string;
   path: string;
   gitInitialized: boolean;
+  cloned: boolean;
 }
 
 export async function createProject(input: CreateProjectInput): Promise<CreateProjectResult> {
@@ -90,10 +133,17 @@ export async function createProject(input: CreateProjectInput): Promise<CreatePr
   }
   if (!repoPath) throw new Error("Either repoPath or repoUrl is required");
 
-  // Register project
+  // Clone from URL if directory doesn't exist yet
+  let cloned = false;
+  if (input.repoUrl && !existsSync(repoPath)) {
+    await cloneProjectRepo(input.repoUrl, repoPath);
+    cloned = true;
+  }
+
+  // Register project (after clone succeeds — don't register broken projects)
   store.addProject({ name: input.name, path: repoPath });
 
-  // Initialize git if missing
+  // Initialize git if directory exists but has no .git (local path scenario)
   const gitInitialized = ensureGitRepo(repoPath);
 
   // Build and save config
@@ -105,7 +155,7 @@ export async function createProject(input: CreateProjectInput): Promise<CreatePr
   if (input.netlifySites) envConfig.NETLIFY_SITES = JSON.stringify(input.netlifySites);
   store.saveProjectConfig(repoPath, envConfig);
 
-  return { name: input.name, path: repoPath, gitInitialized };
+  return { name: input.name, path: repoPath, gitInitialized, cloned };
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +185,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Project name is required" }, { status: 400 });
   }
 
-  const result = await createProject(body);
-  return NextResponse.json(result, { status: 201 });
+  try {
+    const result = await createProject(body);
+    return NextResponse.json(result, { status: 201 });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: msg }, { status: 422 });
+  }
 }

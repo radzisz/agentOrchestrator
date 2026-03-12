@@ -3,7 +3,6 @@ import { existsSync } from "fs";
 import * as store from "@/lib/store";
 import * as cmd from "@/lib/cmd";
 import * as gitSvc from "@/services/git";
-import { findAggregate } from "@/lib/agent-aggregate";
 import { reconcileAllRuntimes } from "@/services/runtime-reconcile";
 
 const SRC = "local-branches";
@@ -56,9 +55,8 @@ export async function GET(
 
         const containerRunning = agent.containerName ? runningContainers.has(agent.containerName) : false;
 
-        // Use aggregate state for git info (consistent, includes sticky merged)
-        const agg = findAggregate(`${name}/${agent.issueId}`);
-        const gitState = agg?.snapshot?.git;
+        // Use persisted agent state for git info (consistent, set by saveAgent after every persist)
+        const gitState = agent.state?.git;
 
         let commit = gitState?.lastCommit
           ? { sha: gitState.lastCommit.sha.slice(0, 7), message: gitState.lastCommit.message, author: gitState.lastCommit.author, date: gitState.lastCommit.date }
@@ -126,10 +124,7 @@ export async function GET(
           merged,
           agentId: agent.issueId,
           agentStatus: agent.status,
-          agentUiStatus: (() => {
-            const agg = findAggregate(`${name}/${agent.issueId}`);
-            return agg ? agg.uiStatus : (agent.uiStatus ?? null);
-          })(),
+          agentUiStatus: agent.uiStatus ?? null,
           agentTitle: agent.title,
           agentCreatedBy: agent.createdBy || null,
           agentCreatedAt: agent.createdAt || null,

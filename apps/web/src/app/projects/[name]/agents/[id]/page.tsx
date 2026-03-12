@@ -28,6 +28,11 @@ function detectGitMode(agentDir: string): "branch" | "worktree" | null {
 
 export const dynamic = "force-dynamic";
 
+export async function generateMetadata({ params }: { params: Promise<{ name: string; id: string }> }) {
+  const { id } = await params;
+  return { title: `10xDev: ${id}` };
+}
+
 export default async function AgentDetailPage({
   params,
 }: {
@@ -36,10 +41,16 @@ export default async function AgentDetailPage({
   const { name: projectName, id } = await params;
 
   const project = store.getProjectByName(projectName);
-  if (!project) notFound();
+  if (!project) {
+    console.error(`[agent-page] Project not found: "${projectName}"`);
+    notFound();
+  }
 
   const agent = store.getAgent(project.path, id);
-  if (!agent) notFound();
+  if (!agent) {
+    console.error(`[agent-page] Agent not found: "${id}" in project "${projectName}" (path: ${project.path})`);
+    notFound();
+  }
 
   // Kick off a background refresh — don't block SSR.
   // The client-side AgentStateProvider polls /api/agents/:id/state every few seconds

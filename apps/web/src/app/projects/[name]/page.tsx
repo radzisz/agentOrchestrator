@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { existsSync } from "fs";
 import { join } from "path";
 import * as store from "@/lib/store";
@@ -49,6 +50,7 @@ export default async function ProjectDetailPage({
   const trackerPreviewLabel = linearConfig?.previewLabel || "";
 
   return (
+    <Suspense>
     <ProjectTabs
       project={{
         name: project.name,
@@ -74,5 +76,6 @@ export default async function ProjectDetailPage({
         projectName: project.name,
       }))}
     />
+    </Suspense>
   );
 }

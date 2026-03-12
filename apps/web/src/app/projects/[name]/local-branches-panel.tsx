@@ -114,12 +114,14 @@ export function LocalBranchesPanel({
   linearTeamKey,
   linearLabel,
   githubConfigured,
+  onRefreshRef,
 }: {
   projectName: string;
   linearConfigured?: boolean;
   linearTeamKey?: string | null;
   linearLabel?: string;
   githubConfigured?: boolean;
+  onRefreshRef?: React.MutableRefObject<(() => void) | null>;
 }) {
   const [branches, setBranches] = useState<LocalBranchInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -136,9 +138,20 @@ export function LocalBranchesPanel({
   // Dialogs
   const [showCheckout, setShowCheckout] = useState(false);
 
+  // Fast poll for 30s after mount (catches freshly dispatched agents)
+  const [recentMount, setRecentMount] = useState(true);
+
   useEffect(() => {
+    setRecentMount(true);
     loadBranches().then(() => refreshRuntimes());
+    const timer = setTimeout(() => setRecentMount(false), 30_000);
+    return () => clearTimeout(timer);
   }, [projectName]);
+
+  useEffect(() => {
+    if (onRefreshRef) onRefreshRef.current = () => loadBranches();
+    return () => { if (onRefreshRef) onRefreshRef.current = null; };
+  });
 
   // Auto-refresh when any agent is in a transient state (starting, running, closing)
   const hasTransient = branches.some((b) => {
@@ -146,11 +159,10 @@ export function LocalBranchesPanel({
     return s === "starting" || s === "running" || s === "closing";
   });
   useEffect(() => {
-    // Fast poll (5s) when agents are in transient states, slow poll (30s) otherwise
-    // so new agents from dispatcher appear without manual refresh
-    const interval = setInterval(() => loadBranches().then(() => refreshRuntimes()), hasTransient ? 5000 : 30000);
+    // Fast poll (5s) when agents are in transient states or just mounted, slow poll (30s) otherwise
+    const interval = setInterval(() => loadBranches().then(() => refreshRuntimes()), (hasTransient || recentMount) ? 5000 : 30000);
     return () => clearInterval(interval);
-  }, [hasTransient, projectName]);
+  }, [hasTransient, recentMount, projectName]);
 
   async function loadBranches() {
     setLoading(true);

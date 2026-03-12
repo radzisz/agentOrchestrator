@@ -238,6 +238,14 @@ export class AgentAggregate {
   /** Clear a stale currentOperation (server crash recovery). */
   clearStaleOperation(reason: string): void {
     this._agent.currentOperation = null;
+    // Reset stuck git.op (e.g. "rebasing" left by server crash)
+    if (this._state.git.op !== "idle") {
+      this._state.git.op = "idle";
+    }
+    // Clear transition if stuck
+    if (this._state.transition) {
+      this._state.transition = null;
+    }
     this.persist();
     this.opLog("lifecycle", `cleared stale operation: ${reason}`);
   }
@@ -294,23 +302,34 @@ export class AgentAggregate {
       removeOps.removeAgent(this._ctx(), setProgress, opts));
   }
 
-  /** Rebase agent branch onto default branch. */
-  async rebase(): Promise<{ success: boolean; steps: any[]; error?: string; conflict?: boolean; conflictFiles?: string[] }> {
+  /** Rebase agent branch onto default branch.
+   *  @param opts.wakeOnConflict — if true, wake the agent to resolve conflicts (default: false for auto-rebase) */
+  async rebase(opts?: { wakeOnConflict?: boolean }): Promise<{ success: boolean; steps: any[]; error?: string; conflict?: boolean; conflictFiles?: string[] }> {
     let result: any;
     await this.withLock("rebase", async (setProgress) => {
       result = await mergeRejectOps.rebase(this._ctx(), setProgress);
 
-      // If conflict, wake the agent with conflict message
-      if (result.conflict && result.conflictFiles) {
+      // If conflict and caller requested wake, start agent to resolve
+      if (result.conflict && result.conflictFiles && opts?.wakeOnConflict) {
         const conflictMsg = [
-          "## Rebase conflicts detected",
+          "## URGENT: Rebase required — conflicts must be resolved",
           "",
-          `Rebase failed with conflicts in ${result.conflictFiles.length} file(s):`,
-          ...result.conflictFiles.map((f: string) => `- \`${f}\``),
+          "An automatic rebase onto the default branch was attempted but **failed due to merge conflicts**.",
+          "The rebase was **aborted** — your working tree is clean but your branch is BEHIND the default branch.",
           "",
-          "1. Resolve conflicts manually",
-          "2. `git add .` then `git rebase --continue`",
-          "3. `git push --force-with-lease`",
+          `Conflicting file(s): ${result.conflictFiles.map((f: string) => `\`${f}\``).join(", ")}`,
+          "",
+          "**You MUST do the following steps (do NOT skip any):**",
+          "",
+          "1. Run `git fetch origin` to get latest changes",
+          "2. Run `git rebase origin/main` — this will show conflicts",
+          "3. Open the conflicting files, resolve ALL conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)",
+          "4. Run `git add .` then `git rebase --continue`",
+          "5. Run `git push --force-with-lease origin HEAD`",
+          "",
+          "**IMPORTANT:** Do NOT just check if the tree is clean — it IS clean because the rebase was aborted.",
+          "You MUST run `git rebase origin/main` again to start the rebase and resolve the actual conflicts.",
+          "Verify with `git rev-list --count HEAD..origin/main` — if this number is > 0, the rebase is NOT done.",
         ].join("\n");
 
         this.wakeAgent(conflictMsg).catch(e => cmd.logError(`rebase:${this.issueId}`, `wake failed: ${e}`));

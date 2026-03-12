@@ -1,5 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
-import { execSync, spawn, ChildProcess } from "child_process";
+import { execSync, exec, spawn, ChildProcess } from "child_process";
+import { promisify } from "util";
+const execAsync = promisify(exec);
 import { simpleGit } from "@/lib/cmd";
 import { join } from "path";
 import * as cmd from "@/lib/cmd";
@@ -548,16 +550,17 @@ export async function startLocalHost(
           cmd = cmd.replace(new RegExp(`\\b${svc.port}\\b`, "g"), String(allocatedPort));
         }
         if (!cmd.includes("--port") && !cmd.includes("-p ")) {
-          cmd += ` --port ${allocatedPort}`;
+          const separator = /^(npm\s+run|npx|pnpm\s+run|yarn)\s/.test(cmd) ? " -- " : " ";
+          cmd += `${separator}--port ${allocatedPort}`;
         }
         rewrittenServices.push({ ...svc, cmd, allocatedPort });
       }
     }
 
-    // Run install command
+    // Run install command (async — doesn't block event loop)
     store.appendLog(project.path, logName, `Running install: ${installCmd}`);
     try {
-      execSync(installCmd, { cwd: agentDir, stdio: "pipe", timeout: 300000 });
+      await execAsync(installCmd, { cwd: agentDir, timeout: 300000, maxBuffer: 10 * 1024 * 1024 });
       store.appendLog(project.path, logName, "Install completed");
     } catch (err: any) {
       store.appendLog(project.path, logName, `Install failed: ${err.message}`);
@@ -569,7 +572,7 @@ export async function startLocalHost(
     if (buildCmd) {
       store.appendLog(project.path, logName, `Running build: ${buildCmd}`);
       try {
-        execSync(buildCmd, { cwd: agentDir, stdio: "pipe", timeout: 300000 });
+        await execAsync(buildCmd, { cwd: agentDir, timeout: 300000, maxBuffer: 10 * 1024 * 1024 });
         store.appendLog(project.path, logName, "Build completed");
       } catch (err: any) {
         store.appendLog(project.path, logName, `Build failed: ${err.message}`);

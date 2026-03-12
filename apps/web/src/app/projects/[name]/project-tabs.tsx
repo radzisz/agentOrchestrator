@@ -59,6 +59,7 @@ export function ProjectTabs({
   const TABS: Tab[] = ["cdm", "agents", "preview", "rules", "integrations"];
   const paramTab = searchParams.get("tab") as Tab | null;
   const tab: Tab = paramTab && TABS.includes(paramTab) ? paramTab : "cdm";
+  const agentsRefreshRef = useRef<(() => void) | null>(null);
 
   const setTab = useCallback((t: Tab) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -141,10 +142,15 @@ export function ProjectTabs({
       {/* Tab content */}
       <div className="p-6">
         {tab === "cdm" && (
-          <CdmTab projectName={project.name} />
+          <CdmTab projectName={project.name} onTaskSubmitted={() => {
+            setTab("agents");
+            // Trigger refresh if agents panel is already mounted (it will mount after setTab)
+            setTimeout(() => agentsRefreshRef.current?.(), 100);
+          }} />
         )}
         {tab === "agents" && (
           <LocalBranchesPanel
+            onRefreshRef={agentsRefreshRef}
             projectName={project.name}
             linearConfigured={project.trackerConfigured}
             linearTeamKey={project.trackerTeamKey}

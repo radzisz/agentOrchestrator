@@ -42,6 +42,7 @@ export function queueMessage(ctx: AggregateContext, message: string): void {
 async function ensureWorkspaceReady(
   ctx: AggregateContext,
   setProgress: (msg: string) => void,
+  opts?: { skipRebase?: boolean },
 ): Promise<{ conflictMessage?: string }> {
   const agentDir = ctx.agent.agentDir!;
   const branch = ctx.agent.branch || `agent/${ctx.issueId}`;
@@ -74,33 +75,48 @@ async function ensureWorkspaceReady(
   }
 
   // 2. Fetch + rebase onto default branch (skip for worktrees without remote)
-  if (existsSync(join(agentDir, ".git"))) {
-    try {
-      setProgress("fetching latest");
-      await gitOps.fetchRepo(ctx.agent, ctx.state);
+  //    Also skip if caller already tried rebase and knows about conflicts
+  if (!opts?.skipRebase) {
+    ctx.state.git.rebaseConflict = false;
+    if (existsSync(join(agentDir, ".git"))) {
+      try {
+        setProgress("fetching latest");
+        await gitOps.fetchRepo(ctx.agent, ctx.state);
 
-      setProgress("rebasing onto main");
-      const rebaseResult = await gitOps.rebaseRepo(ctx.agent, ctx.projectPath, ctx.state, setProgress);
+        setProgress("rebasing onto main");
+        const rebaseResult = await gitOps.rebaseRepo(ctx.agent, ctx.projectPath, ctx.state, setProgress);
 
-      if (rebaseResult.conflict && rebaseResult.conflictFiles) {
-        ctx.opLog("wake", `rebase conflict in ${rebaseResult.conflictFiles.length} file(s)`);
-        conflictMessage = [
-          "## Rebase conflicts detected during wake",
-          "",
-          `Rebase onto the default branch failed with conflicts in ${rebaseResult.conflictFiles.length} file(s):`,
-          ...rebaseResult.conflictFiles.map((f: string) => `- \`${f}\``),
-          "",
-          "Please resolve the conflicts:",
-          "1. `git add .` then `git rebase --continue`",
-          "2. If needed, `git rebase --abort` to undo",
-        ].join("\n");
-      } else if (!rebaseResult.success && !rebaseResult.conflict) {
-        // Non-conflict rebase failure — log but don't block wake
-        ctx.opLog("wake", `rebase failed (non-conflict): ${rebaseResult.error || "unknown"}`);
+        if (rebaseResult.conflict && rebaseResult.conflictFiles) {
+          ctx.state.git.rebaseConflict = true;
+          ctx.opLog("wake", `rebase conflict in ${rebaseResult.conflictFiles.length} file(s)`);
+          conflictMessage = [
+            "## URGENT: Rebase required — conflicts must be resolved",
+            "",
+            "An automatic rebase onto the default branch was attempted but **failed due to merge conflicts**.",
+            "The rebase was **aborted** — your working tree is clean but your branch is BEHIND the default branch.",
+            "",
+            `Conflicting file(s): ${rebaseResult.conflictFiles.map((f: string) => `\`${f}\``).join(", ")}`,
+            "",
+            "**You MUST do the following steps (do NOT skip any):**",
+            "",
+            "1. Run `git fetch origin` to get latest changes",
+            "2. Run `git rebase origin/main` — this will show conflicts",
+            "3. Open the conflicting files, resolve ALL conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)",
+            "4. Run `git add .` then `git rebase --continue`",
+            "5. Run `git push --force-with-lease origin HEAD`",
+            "",
+            "**IMPORTANT:** Do NOT just check if the tree is clean — it IS clean because the rebase was aborted.",
+            "You MUST run `git rebase origin/main` again to start the rebase and resolve the actual conflicts.",
+            "Verify with `git rev-list --count HEAD..origin/main` — if this number is > 0, the rebase is NOT done.",
+          ].join("\n");
+        } else if (!rebaseResult.success && !rebaseResult.conflict) {
+          // Non-conflict rebase failure — log but don't block wake
+          ctx.opLog("wake", `rebase failed (non-conflict): ${rebaseResult.error || "unknown"}`);
+        }
+      } catch (err) {
+        // Fetch/rebase failure shouldn't block wake — agent can still work
+        ctx.opLog("wake", `fetch/rebase failed: ${err}`);
       }
-    } catch (err) {
-      // Fetch/rebase failure shouldn't block wake — agent can still work
-      ctx.opLog("wake", `fetch/rebase failed: ${err}`);
     }
   }
 
@@ -207,7 +223,10 @@ export async function wakeAgent(
   ctx.beginTransition("running");
 
   // Self-healing: ensure workspace has source code, .10timesdev files, fetch+rebase
-  const { conflictMessage } = await ensureWorkspaceReady(ctx, setProgress);
+  // If message already contains rebase conflict info, skip the rebase in ensureWorkspaceReady
+  // to avoid duplicate messages (caller already rebased and knows about the conflict)
+  const skipRebase = !!message && message.includes("Rebase") && message.includes("conflict");
+  const { conflictMessage } = await ensureWorkspaceReady(ctx, setProgress, { skipRebase });
 
   // Append conflict info to conversation if rebase had conflicts
   if (conflictMessage) {

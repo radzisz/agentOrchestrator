@@ -82,13 +82,16 @@ function scheduleNext(delayMs: number): void {
 async function tick(): Promise<void> {
   const projects = store.listProjects();
 
-  for (const project of projects) {
-    try {
-      await processProjectTrackers(project);
-    } catch (error) {
-      log(`Error processing ${project.name}: ${error}`);
-    }
-  }
+  // Process projects in parallel — they are independent
+  await Promise.all(
+    projects.map(async (project) => {
+      try {
+        await processProjectTrackers(project);
+      } catch (error) {
+        log(`Error processing ${project.name}: ${error}`);
+      }
+    }),
+  );
 
   await cleanupExpiredRuntimes();
 }

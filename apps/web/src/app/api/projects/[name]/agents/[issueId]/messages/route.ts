@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as store from "@/lib/store";
-import { tryGetAggregate } from "@/lib/agent-aggregate";
 
 export async function GET(
   _req: NextRequest,
@@ -20,9 +19,8 @@ export async function GET(
 
   const messages = store.getMessages(project.path, issueId);
 
-  // Return cached uiStatus — the /api/agents/[id]/state endpoint handles refresh
-  const agg = tryGetAggregate(name, issueId);
-  const uiStatus = agg ? agg.uiStatus : (agent.uiStatus || { status: "closed" });
+  // Use persisted uiStatus — single source of truth (set by saveAgent after every persist)
+  const uiStatus = agent.uiStatus || { status: "closed" };
 
   return NextResponse.json({ messages, status: agent.status, uiStatus });
 }

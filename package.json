@@ -9,5 +9,11 @@
     "lint": "pnpm --filter @orchestrator/web lint",
     "test": "pnpm -r test",
     "test:watch": "pnpm --filter @orchestrator/web test:watch"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.6.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13"
   }
 }

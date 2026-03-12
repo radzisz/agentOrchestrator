@@ -17,10 +17,12 @@ export async function rebase(
 ): Promise<{ success: boolean; steps: any[]; error?: string; conflict?: boolean; conflictFiles?: string[] }> {
   ctx.agent.rebaseResult = undefined;
   ctx.state.git.op = "rebasing";
+  ctx.state.git.rebaseConflict = false;
   ctx.persist();
 
   const result = await gitOps.rebaseRepo(ctx.agent, ctx.projectPath, ctx.state, setProgress);
   ctx.agent.rebaseResult = result;
+  ctx.state.git.rebaseConflict = !!result.conflict;
 
   // If conflict, wake the agent with conflict message (done in aggregate to avoid circular dep)
   ctx.opLog("rebase", `result: success=${result.success}`);

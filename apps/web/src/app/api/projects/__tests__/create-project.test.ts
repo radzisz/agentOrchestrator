@@ -3,7 +3,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync
 import { join } from "path";
 import { tmpdir } from "os";
 import { execSync } from "child_process";
-import { ensureGitRepo, discoverGitRemoteUrl } from "../route";
+import { ensureGitRepo, discoverGitRemoteUrl, createProject } from "../route";
+import * as store from "@/lib/store";
 
 // ---------------------------------------------------------------------------
 // ensureGitRepo
@@ -128,5 +129,143 @@ describe("discoverGitRemoteUrl", () => {
     execSync("git remote add origin git@github.com:org/repo.git", { cwd: tempDir, stdio: "pipe" });
 
     expect(discoverGitRemoteUrl(tempDir)).toBe("https://github.com/org/repo");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createProject → listProjects (project visible without restart)
+// ---------------------------------------------------------------------------
+
+// Mock simpleGit so we don't do real network clone
+vi.mock("@/lib/cmd", () => ({
+  simpleGit: vi.fn(() => ({
+    clone: vi.fn(async () => {}),
+    addConfig: vi.fn(async () => {}),
+  })),
+}));
+
+// Mock getBasePath to return our temp dir
+vi.mock("@/integrations/local-drive", () => ({
+  getBasePath: vi.fn(async () => tmpdir()),
+}));
+
+describe("createProject → listProjects (no restart)", () => {
+  const projectName = `__test_project_${Date.now()}`;
+  let tempProjectPath: string;
+
+  afterEach(() => {
+    // Clean up: remove from store and disk
+    store.removeProject(projectName);
+    if (tempProjectPath && existsSync(tempProjectPath)) {
+      rmSync(tempProjectPath, { recursive: true, force: true });
+    }
+  });
+
+  it("newly created project appears in listProjects immediately", async () => {
+    // Set up a temp directory that looks like a git repo
+    tempProjectPath = join(tmpdir(), projectName);
+    mkdirSync(tempProjectPath, { recursive: true });
+    mkdirSync(join(tempProjectPath, ".git"), { recursive: true });
+
+    // Verify project doesn't exist yet
+    const before = store.listProjects();
+    expect(before.find((p) => p.name === projectName)).toBeUndefined();
+
+    // Create via the same function the POST handler calls
+    const result = await createProject({
+      name: projectName,
+      repoPath: tempProjectPath,
+    });
+
+    expect(result.name).toBe(projectName);
+    expect(result.path).toBe(tempProjectPath);
+
+    // Immediately list — must include the new project
+    const after = store.listProjects();
+    const found = after.find((p) => p.name === projectName);
+    expect(found).toBeDefined();
+    expect(found!.path).toBe(tempProjectPath);
+  });
+
+  it("project created via URL (clone) is listed immediately", async () => {
+    tempProjectPath = join(tmpdir(), projectName);
+    // simpleGit.clone is mocked — simulate that it creates the dir with .git
+    mkdirSync(tempProjectPath, { recursive: true });
+    mkdirSync(join(tempProjectPath, ".git"), { recursive: true });
+
+    const result = await createProject({
+      name: projectName,
+      repoUrl: "https://github.com/test/repo",
+      repoPath: tempProjectPath,
+    });
+
+    expect(result.name).toBe(projectName);
+
+    // List must include it without any restart
+    const projects = store.listProjects();
+    const found = projects.find((p) => p.name === projectName);
+    expect(found).toBeDefined();
+    expect(found!.path).toBe(tempProjectPath);
+  });
+
+  it("project config (REPO_URL) is readable after create", async () => {
+    tempProjectPath = join(tmpdir(), projectName);
+    mkdirSync(tempProjectPath, { recursive: true });
+    mkdirSync(join(tempProjectPath, ".git"), { recursive: true });
+
+    await createProject({
+      name: projectName,
+      repoPath: tempProjectPath,
+      repoUrl: "https://github.com/org/myrepo",
+    });
+
+    const cfg = store.getProjectConfig(tempProjectPath);
+    expect(cfg.REPO_URL).toBe("https://github.com/org/myrepo");
+  });
+
+  it("removed project disappears from listProjects immediately", async () => {
+    tempProjectPath = join(tmpdir(), projectName);
+    mkdirSync(tempProjectPath, { recursive: true });
+    mkdirSync(join(tempProjectPath, ".git"), { recursive: true });
+
+    await createProject({ name: projectName, repoPath: tempProjectPath });
+
+    // Verify it's there
+    expect(store.listProjects().find((p) => p.name === projectName)).toBeDefined();
+
+    // Remove
+    store.removeProject(projectName);
+
+    // Must be gone immediately
+    expect(store.listProjects().find((p) => p.name === projectName)).toBeUndefined();
+  });
+
+  it("removing a project does not affect other projects", async () => {
+    const otherName = `__test_other_${Date.now()}`;
+    const otherPath = join(tmpdir(), otherName);
+    tempProjectPath = join(tmpdir(), projectName);
+
+    mkdirSync(tempProjectPath, { recursive: true });
+    mkdirSync(join(tempProjectPath, ".git"), { recursive: true });
+    mkdirSync(otherPath, { recursive: true });
+    mkdirSync(join(otherPath, ".git"), { recursive: true });
+
+    await createProject({ name: projectName, repoPath: tempProjectPath });
+    await createProject({ name: otherName, repoPath: otherPath });
+
+    // Both exist
+    expect(store.listProjects().find((p) => p.name === projectName)).toBeDefined();
+    expect(store.listProjects().find((p) => p.name === otherName)).toBeDefined();
+
+    // Remove one
+    store.removeProject(projectName);
+
+    // Only the removed one is gone
+    expect(store.listProjects().find((p) => p.name === projectName)).toBeUndefined();
+    expect(store.listProjects().find((p) => p.name === otherName)).toBeDefined();
+
+    // Clean up other
+    store.removeProject(otherName);
+    rmSync(otherPath, { recursive: true, force: true });
   });
 });

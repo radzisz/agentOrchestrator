@@ -51,17 +51,24 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
   const [view, setView] = useState<"grid" | "list">("grid");
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [starred, setStarred] = useState<Set<string>>(new Set());
 
   async function confirmDelete() {
     if (!deleteTarget) return;
     setDeleting(true);
+    setDeleteError(null);
     try {
-      await fetch(`/api/projects/${deleteTarget}`, { method: "DELETE" });
-      setDeleteTarget(null);
-      router.refresh();
-    } catch {
-      // ignore
+      const resp = await fetch(`/api/projects/${deleteTarget}`, { method: "DELETE" });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        setDeleteError(data.error || `HTTP ${resp.status}`);
+        return;
+      }
+      // Keep dialog open with progress until full page reload refreshes the list
+      window.location.href = `/projects?t=${Date.now()}`;
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Network error");
     } finally {
       setDeleting(false);
     }
@@ -248,8 +255,8 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
       )}
 
       {/* Delete confirmation dialog */}
-      <Dialog open={!!deleteTarget} onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}>
-        <DialogContent showCloseButton={false}>
+      <Dialog open={!!deleteTarget} onOpenChange={(open) => { if (!open && !deleting) { setDeleteTarget(null); setDeleteError(null); } }}>
+        <DialogContent showCloseButton={!deleting}>
           <DialogHeader>
             <DialogTitle>Remove project</DialogTitle>
             <DialogDescription asChild>
@@ -265,8 +272,20 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
               </div>
             </DialogDescription>
           </DialogHeader>
+          {deleteError && (
+            <p className="text-sm text-destructive">{deleteError}</p>
+          )}
+          {deleting && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Removing project...
+            </div>
+          )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)} disabled={deleting}>
+            <Button variant="outline" onClick={() => { setDeleteTarget(null); setDeleteError(null); }} disabled={deleting}>
               Cancel
             </Button>
             <Button variant="destructive" onClick={confirmDelete} disabled={deleting}>

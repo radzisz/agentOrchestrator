@@ -31,6 +31,8 @@ export interface GitState {
   behindBy: number;
   merged: boolean;
   lastCommit: { sha: string; message: string; author: string; date: string } | null;
+  /** Set to true when rebase failed due to conflicts (cleared on next rebase attempt or wake). */
+  rebaseConflict?: boolean;
 }
 
 export interface ServiceState {
@@ -133,7 +135,7 @@ export function deriveUiStatus(
 
   // Awaiting: agent stopped but lifecycle active (or tracker closed with resources still up)
   if (state.lifecycle === "active" || state.lifecycle === "spawning") {
-    if (state.git.op === "rebasing") {
+    if (state.git.op === "rebasing" || state.git.rebaseConflict) {
       return { status: "awaiting", reason: "conflict" };
     }
     return { status: "awaiting", reason: "completed" };

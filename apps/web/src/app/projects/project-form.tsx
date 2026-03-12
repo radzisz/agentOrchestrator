@@ -22,6 +22,7 @@ export function ProjectForm() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("url");
   const [localMode, setLocalMode] = useState<LocalMode>("browse");
@@ -62,6 +63,7 @@ export function ProjectForm() {
     e.preventDefault();
     setLoading(true);
     setError(null);
+    setLoadingMessage(null);
 
     const formData = new FormData(e.currentTarget);
     const body: Record<string, string | undefined> = {};
@@ -76,6 +78,7 @@ export function ProjectForm() {
       body.repoUrl = url;
       const match = url.match(/\/([^/]+?)(?:\.git)?$/);
       body.name = formData.get("name") as string || (match?.[1] ?? "project");
+      setLoadingMessage("Cloning repository...");
     } else {
       const path = localPath.trim();
       if (!path) {
@@ -86,6 +89,7 @@ export function ProjectForm() {
       body.repoPath = path;
       const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
       body.name = formData.get("name") as string || parts[parts.length - 1] || "project";
+      setLoadingMessage("Adding project...");
     }
 
     const resp = await fetch("/api/projects", {
@@ -98,12 +102,14 @@ export function ProjectForm() {
       const data = await resp.json().catch(() => ({}));
       setError(data.error || `HTTP ${resp.status}`);
       setLoading(false);
+      setLoadingMessage(null);
       return;
     }
 
     const result = await resp.json().catch(() => ({}));
 
     setLoading(false);
+    setLoadingMessage(null);
 
     if (result.gitInitialized) {
       setGitInitResult(result.path);
@@ -322,12 +328,22 @@ export function ProjectForm() {
             <p className="text-sm text-destructive">{error}</p>
           )}
 
+          {loadingMessage && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              {loadingMessage}
+            </div>
+          )}
+
           <div className="flex gap-2 justify-end pt-2">
-            <Button variant="outline" type="button" onClick={() => { setOpen(false); setError(null); }}>
+            <Button variant="outline" type="button" onClick={() => { if (!loading) { setOpen(false); setError(null); } }} disabled={loading}>
               Cancel
             </Button>
             <Button type="submit" disabled={loading || (mode === "local" && localMode === "browse" && !localPath)}>
-              {loading ? "Creating..." : "Create"}
+              {loading ? (loadingMessage || "Creating...") : "Create"}
             </Button>
           </div>
         </form>

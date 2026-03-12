@@ -10,7 +10,10 @@ import { Toaster } from "sonner";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "10TimesDev",
+  title: {
+    default: "10xDev",
+    template: "%s",
+  },
   description: "AI-powered development — 10x your engineering output",
 };
 

@@ -16,7 +16,7 @@ export async function POST(
     return NextResponse.json({ started: false, reason: "already rebasing" });
   }
 
-  agg.rebase().catch((err) => {
+  agg.rebase({ wakeOnConflict: true }).catch((err) => {
     cmd.logError(`rebase:${agg.issueId}`, `Background crash: ${err}`);
   });
 

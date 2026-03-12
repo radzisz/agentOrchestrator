@@ -1,5 +1,8 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, appendFileSync, rmSync, statSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, statSync } from "fs";
+import { writeFile, appendFile, mkdir } from "fs/promises";
 import { join, dirname } from "path";
+import { stateFromLegacy, deriveLegacyStatus } from "@/lib/agent-aggregate/compat";
+import { deriveUiStatus } from "@/lib/agent-aggregate/types";
 
 // ---------------------------------------------------------------------------
 // Deep clone — used by getters to prevent external mutation of cached objects
@@ -7,7 +10,107 @@ import { join, dirname } from "path";
 
 function deepClone<T>(obj: T): T {
   if (obj === null || obj === undefined || typeof obj !== "object") return obj;
-  return JSON.parse(JSON.stringify(obj));
+  return structuredClone(obj);
+}
+
+// ---------------------------------------------------------------------------
+// Async Disk Writer — write-behind cache with coalescing
+// ---------------------------------------------------------------------------
+// Callers update in-memory cache synchronously and schedule an async disk write.
+// Multiple rapid writes to the same path collapse into one I/O operation.
+
+const _pendingWrites = new Map<string, { data: string; dir?: string }>();
+let _flushTimer: ReturnType<typeof setTimeout> | null = null;
+const FLUSH_INTERVAL_MS = 150;
+
+function scheduleDiskWrite(filePath: string, data: string, ensureDirPath?: string): void {
+  _pendingWrites.set(filePath, { data, dir: ensureDirPath });
+  if (!_flushTimer) {
+    _flushTimer = setTimeout(flushWrites, FLUSH_INTERVAL_MS);
+  }
+}
+
+async function flushWrites(): Promise<void> {
+  _flushTimer = null;
+  if (_pendingWrites.size === 0) return;
+
+  const batch = new Map(_pendingWrites);
+  _pendingWrites.clear();
+
+  const ops: Promise<void>[] = [];
+  for (const [filePath, { data, dir }] of batch) {
+    ops.push(
+      (async () => {
+        try {
+          if (dir && !existsSync(dir)) await mkdir(dir, { recursive: true });
+          await writeFile(filePath, data, "utf-8");
+        } catch (err) {
+          // Log but don't crash — cache is already consistent
+          console.error(`[store] async write failed for ${filePath}: ${err}`);
+        }
+      })(),
+    );
+  }
+  await Promise.all(ops);
+}
+
+// ---------------------------------------------------------------------------
+// Buffered Log Writer — batches appendLog / appendMessage calls
+// ---------------------------------------------------------------------------
+
+const _logBuffers = new Map<string, string[]>();
+let _logFlushTimer: ReturnType<typeof setTimeout> | null = null;
+const LOG_FLUSH_INTERVAL_MS = 200;
+
+function bufferAppend(filePath: string, line: string, dirPath: string): void {
+  let buf = _logBuffers.get(filePath);
+  if (!buf) {
+    buf = [];
+    _logBuffers.set(filePath, buf);
+  }
+  buf.push(line);
+  if (!_logFlushTimer) {
+    _logFlushTimer = setTimeout(flushLogBuffers, LOG_FLUSH_INTERVAL_MS);
+  }
+}
+
+async function flushLogBuffers(): Promise<void> {
+  _logFlushTimer = null;
+  if (_logBuffers.size === 0) return;
+
+  const batch = new Map(_logBuffers);
+  _logBuffers.clear();
+
+  const ops: Promise<void>[] = [];
+  for (const [filePath, lines] of batch) {
+    ops.push(
+      (async () => {
+        try {
+          const dir = dirname(filePath);
+          if (!existsSync(dir)) await mkdir(dir, { recursive: true });
+          await appendFile(filePath, lines.join(""), "utf-8");
+        } catch (err) {
+          console.error(`[store] async log flush failed for ${filePath}: ${err}`);
+        }
+      })(),
+    );
+  }
+  await Promise.all(ops);
+}
+
+/** Flush all pending writes + logs immediately. Call on graceful shutdown. */
+export async function flushAll(): Promise<void> {
+  if (_flushTimer) { clearTimeout(_flushTimer); _flushTimer = null; }
+  if (_logFlushTimer) { clearTimeout(_logFlushTimer); _logFlushTimer = null; }
+  await Promise.all([flushWrites(), flushLogBuffers()]);
+}
+
+// Safety net: flush on process exit
+if (typeof process !== "undefined") {
+  const exitFlush = () => { flushAll().catch(() => {}); };
+  process.on("beforeExit", exitFlush);
+  process.on("SIGTERM", () => { flushAll().then(() => process.exit(0)).catch(() => process.exit(1)); });
+  process.on("SIGINT", () => { flushAll().then(() => process.exit(0)).catch(() => process.exit(1)); });
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +326,8 @@ function writeSecrets(secrets: Record<string, string>): void {
   for (const [key, value] of Object.entries(secrets).sort(([a], [b]) => a.localeCompare(b))) {
     if (value) lines.push(`${key}=${value}`);
   }
+  // Sync — secrets must persist immediately (same reason as config.json)
+  ensureDir(CONFIG_DIR);
   writeFileSync(SECRETS_PATH, lines.join("\n") + "\n", "utf-8");
 }
 
@@ -272,6 +377,7 @@ function migrateSecretsIfNeeded(config: AppConfig): void {
   const { cleaned, secrets } = stripSecrets(deepClone(config));
   if (Object.keys(secrets).length === 0) return;
   writeSecrets(secrets);
+  ensureDir(CONFIG_DIR);
   writeFileSync(CONFIG_PATH, JSON.stringify(cleaned, null, 2), "utf-8");
 }
 
@@ -312,6 +418,7 @@ export function invalidateCache(projectPath?: string): void {
     _projectConfigs.delete(projectPath);
   } else {
     _appConfig = null;
+    _appConfigMtimeMs = 0;
     _projectConfigs.clear();
     _agents.clear();
     _agentsLoaded.clear();
@@ -330,16 +437,29 @@ const DEFAULT_CONFIG: AppConfig = {
   nextPortSlot: 0,
 };
 
-let _appConfigMtime = 0;
+// Track mtime so we detect external writes (e.g. API route updated config
+// but SSR is reading from a separate module instance with stale cache).
+let _appConfigMtimeMs = 0;
 
 export function getConfig(): AppConfig {
+  // Check if config file changed on disk since our last read.
+  // This is cheap (one statSync) and fixes stale cache across Next.js
+  // module instances (API routes vs SSR share the same file, but not memory).
+  if (_appConfig && existsSync(CONFIG_PATH)) {
+    const diskMtime = statSync(CONFIG_PATH).mtimeMs;
+    if (diskMtime > _appConfigMtimeMs) {
+      _appConfig = null; // force re-read
+    }
+  }
+
+  if (_appConfig) return _appConfig;
+
   if (!existsSync(CONFIG_PATH)) {
     _appConfig = { ...DEFAULT_CONFIG };
     saveConfig(_appConfig);
     return _appConfig;
   }
-  const mtime = statSync(CONFIG_PATH).mtimeMs;
-  if (_appConfig && mtime === _appConfigMtime) return _appConfig;
+  _appConfigMtimeMs = statSync(CONFIG_PATH).mtimeMs;
   _appConfig = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
   // Auto-migrate secrets on first load
   migrateSecretsIfNeeded(_appConfig!);
@@ -348,16 +468,19 @@ export function getConfig(): AppConfig {
   if (Object.keys(secrets).length > 0) {
     mergeSecrets(_appConfig!, secrets);
   }
-  _appConfigMtime = statSync(CONFIG_PATH).mtimeMs; // re-read after possible migration write
   return _appConfig!;
 }
 
 export function saveConfig(config: AppConfig): void {
   const { cleaned, secrets } = stripSecrets(deepClone(config));
   writeSecrets(secrets);
-  writeFileSync(CONFIG_PATH, JSON.stringify(cleaned, null, 2), "utf-8");
   _appConfig = config; // cache with secrets in-memory
-  _appConfigMtime = statSync(CONFIG_PATH).mtimeMs;
+  // Config.json is written synchronously — it's infrequent (project add/remove,
+  // integration config changes) and must survive Next.js hot reload / module re-eval
+  // where in-memory _appConfig is lost and the file must be up to date.
+  ensureDir(CONFIG_DIR);
+  writeFileSync(CONFIG_PATH, JSON.stringify(cleaned, null, 2), "utf-8");
+  _appConfigMtimeMs = statSync(CONFIG_PATH).mtimeMs;
 }
 
 // ---------------------------------------------------------------------------
@@ -503,7 +626,65 @@ function agentFilePath(projectPath: string, issueId: string): string {
   return join(orchestratorDir(projectPath), "agents", issueId, ".10timesdev", "config.json");
 }
 
-/** Ensure all agents for a project are loaded into cache */
+/** Load a single agent directory into the cache map (returns true if loaded). */
+function loadAgentDir(map: Map<string, AgentData>, agentsDir: string, d: string, projectPath: string): boolean {
+  const cfgPath = join(agentsDir, d, ".10timesdev", "config.json");
+  if (existsSync(cfgPath)) {
+    try {
+      const data = JSON.parse(readFileSync(cfgPath, "utf-8")) as AgentData;
+      map.set(d, data);
+      return true;
+    } catch {}
+  } else if (existsSync(join(agentsDir, d, "git", ".git"))) {
+    // New structure: git clone in git/ subdir, no config.json yet
+    const now = new Date().toISOString();
+    const stub: AgentData = {
+      issueId: d,
+      title: d,
+      status: "EXITED",
+      branch: `agent/${d}`,
+      agentDir: join(agentsDir, d, "git"),
+      servicesEnabled: false,
+      spawned: false,
+      previewed: false,
+      notified: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    map.set(d, stub);
+    const p = agentFilePath(projectPath, d);
+    scheduleDiskWrite(p, JSON.stringify(stub, null, 2), dirname(p));
+    return true;
+  } else if (existsSync(join(agentsDir, d, ".git"))) {
+    // Legacy structure: git clone at agent root
+    const now = new Date().toISOString();
+    const stub: AgentData = {
+      issueId: d,
+      title: d,
+      status: "EXITED",
+      branch: `agent/${d}`,
+      agentDir: join(agentsDir, d),
+      servicesEnabled: false,
+      spawned: false,
+      previewed: false,
+      notified: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    map.set(d, stub);
+    // Persist so next load finds it
+    const p = agentFilePath(projectPath, d);
+    scheduleDiskWrite(p, JSON.stringify(stub, null, 2), dirname(p));
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Ensure all agents for a project are loaded into cache.
+ * Full disk scan on first call only. After that, cache is authoritative
+ * (write-through via saveAgent/cacheAgent, single-item fallback in getAgent).
+ */
 function ensureAgentsLoaded(projectPath: string): Map<string, AgentData> {
   if (_agentsLoaded.has(projectPath)) {
     return _agents.get(projectPath) || new Map();
@@ -526,54 +707,7 @@ function ensureAgentsLoaded(projectPath: string): Map<string, AgentData> {
   if (existsSync(agentsDir)) {
     for (const d of readdirSync(agentsDir)) {
       if (d.startsWith(".")) continue;
-      const cfgPath = join(agentsDir, d, ".10timesdev", "config.json");
-      if (existsSync(cfgPath)) {
-        try {
-          const data = JSON.parse(readFileSync(cfgPath, "utf-8")) as AgentData;
-          map.set(d, data);
-        } catch {}
-      } else if (existsSync(join(agentsDir, d, "git", ".git"))) {
-        // New structure: git clone in git/ subdir, no config.json yet
-        const now = new Date().toISOString();
-        const stub: AgentData = {
-          issueId: d,
-          title: d,
-          status: "EXITED",
-          branch: `agent/${d}`,
-          agentDir: join(agentsDir, d, "git"),
-          servicesEnabled: false,
-          spawned: false,
-          previewed: false,
-          notified: false,
-          createdAt: now,
-          updatedAt: now,
-        };
-        map.set(d, stub);
-        const p = agentFilePath(projectPath, d);
-        ensureDir(dirname(p));
-        writeFileSync(p, JSON.stringify(stub, null, 2), "utf-8");
-      } else if (existsSync(join(agentsDir, d, ".git"))) {
-        // Legacy structure: git clone at agent root
-        const now = new Date().toISOString();
-        const stub: AgentData = {
-          issueId: d,
-          title: d,
-          status: "EXITED",
-          branch: `agent/${d}`,
-          agentDir: join(agentsDir, d),
-          servicesEnabled: false,
-          spawned: false,
-          previewed: false,
-          notified: false,
-          createdAt: now,
-          updatedAt: now,
-        };
-        map.set(d, stub);
-        // Persist so next load finds it
-        const p = agentFilePath(projectPath, d);
-        ensureDir(dirname(p));
-        writeFileSync(p, JSON.stringify(stub, null, 2), "utf-8");
-      }
+      loadAgentDir(map, agentsDir, d, projectPath);
     }
   }
 
@@ -584,15 +718,21 @@ function ensureAgentsLoaded(projectPath: string): Map<string, AgentData> {
 
 export function getAgent(projectPath: string, issueId: string): AgentData | null {
   const map = ensureAgentsLoaded(projectPath);
-  const agent = map.get(issueId) || null;
-  // Prune from cache if config.json was deleted from disk
-  if (agent && !existsSync(agentFilePath(projectPath, issueId))) {
-    map.delete(issueId);
-    return null;
+  let agent = map.get(issueId) || null;
+  // Disk fallback: if the cache misses, check if the agent file exists on disk
+  // (e.g. created by another process or the dispatcher after cache was populated)
+  if (!agent) {
+    const cfgPath = agentFilePath(projectPath, issueId);
+    if (existsSync(cfgPath)) {
+      try {
+        agent = JSON.parse(readFileSync(cfgPath, "utf-8")) as AgentData;
+        map.set(issueId, agent);
+      } catch {}
+    }
   }
   if (agent && !agent.state) {
     // Bootstrap aggregate state from legacy status on first access
-    const { stateFromLegacy } = require("@/lib/agent-aggregate/compat");
+
     agent.state = stateFromLegacy(agent);
     agent.currentOperation = null;
   }
@@ -601,7 +741,7 @@ export function getAgent(projectPath: string, issueId: string): AgentData | null
     agent.state.trackerStatus = (agent.state as any).linearStatus || "unstarted";
   }
   if (agent && agent.state && !agent.uiStatus) {
-    const { deriveUiStatus } = require("@/lib/agent-aggregate/types");
+
     agent.uiStatus = deriveUiStatus(agent.state, agent.currentOperation ?? null);
   }
   if (agent && !agent.issueCreatedAt && agent.createdAt) {
@@ -616,12 +756,7 @@ export function getAgent(projectPath: string, issueId: string): AgentData | null
  */
 export function getAgentRef(projectPath: string, issueId: string): AgentData | null {
   const map = ensureAgentsLoaded(projectPath);
-  const agent = map.get(issueId) || null;
-  if (agent && !existsSync(agentFilePath(projectPath, issueId))) {
-    map.delete(issueId);
-    return null;
-  }
-  return agent;
+  return map.get(issueId) || null;
 }
 
 /** Add agent to in-memory cache without writing to disk. Use when disk write would cause side-effects. */
@@ -633,21 +768,20 @@ export function cacheAgent(projectPath: string, issueId: string, data: AgentData
 export function saveAgent(projectPath: string, issueId: string, data: AgentData): void {
   // Derive statuses from aggregate state
   if (data.state) {
-    const { deriveLegacyStatus } = require("@/lib/agent-aggregate/compat");
-    const { deriveUiStatus } = require("@/lib/agent-aggregate/types");
+
+
     data.status = deriveLegacyStatus(data.state, data.currentOperation ?? null);
     data.uiStatus = deriveUiStatus(data.state, data.currentOperation ?? null);
   }
 
-  // Update cache
+  // Update cache (synchronous — reads see new data immediately)
   const map = ensureAgentsLoaded(projectPath);
   data.updatedAt = new Date().toISOString();
   map.set(issueId, data);
 
-  // Write to disk
+  // Async write — coalesced if multiple saves happen quickly
   const p = agentFilePath(projectPath, issueId);
-  ensureDir(dirname(p));
-  writeFileSync(p, JSON.stringify(data, null, 2), "utf-8");
+  scheduleDiskWrite(p, JSON.stringify(data, null, 2), dirname(p));
 }
 
 /** Read a single meta value from an agent. */
@@ -667,19 +801,12 @@ export function setAgentMeta(projectPath: string, issueId: string, key: string, 
 
 export function listAgents(projectPath: string): Array<AgentData & { _projectPath: string }> {
   const map = ensureAgentsLoaded(projectPath);
-
-  // Prune agents whose config.json no longer exists on disk (e.g. directory deleted manually)
-  for (const [id, agent] of map) {
-    const cfgPath = agentFilePath(projectPath, id);
-    if (!existsSync(cfgPath)) {
-      map.delete(id);
-    }
-  }
+  // Trust write-through cache — no per-agent existsSync check.
 
   return Array.from(map.values()).map((agent) => {
     // Bootstrap state/uiStatus if missing (same as getAgent)
     if (!agent.state) {
-      const { stateFromLegacy } = require("@/lib/agent-aggregate/compat");
+  
       agent.state = stateFromLegacy(agent);
       agent.currentOperation = null;
     }
@@ -688,7 +815,7 @@ export function listAgents(projectPath: string): Array<AgentData & { _projectPat
       agent.state.trackerStatus = (agent.state as any).linearStatus || "unstarted";
     }
     if (!agent.uiStatus) {
-      const { deriveUiStatus } = require("@/lib/agent-aggregate/types");
+  
       agent.uiStatus = deriveUiStatus(agent.state, agent.currentOperation ?? null);
     }
     if (!agent.issueCreatedAt && agent.createdAt) {
@@ -765,8 +892,7 @@ function ensureRuntimesLoaded(projectPath: string): RuntimeData[] {
           if (data.branch) {
             // Migrate: write to new location
             const p = runtimeFilePath(projectPath, data.type || "LOCAL", data.branch);
-            ensureDir(dirname(p));
-            writeFileSync(p, JSON.stringify(data, null, 2), "utf-8");
+            scheduleDiskWrite(p, JSON.stringify(data, null, 2), dirname(p));
             try { unlinkSync(join(dir, f)); } catch {}
           }
           results.push(data);
@@ -793,7 +919,7 @@ export function getRuntime(projectPath: string, branch: string, type: RuntimeTyp
 export function saveRuntime(projectPath: string, branch: string, type: RuntimeType, data: RuntimeData): void {
   data.updatedAt = new Date().toISOString();
 
-  // Update cache
+  // Update cache (synchronous)
   const runtimes = ensureRuntimesLoaded(projectPath);
   const idx = runtimes.findIndex((r) => r.branch === branch && r.type === type);
   if (idx >= 0) {
@@ -802,10 +928,9 @@ export function saveRuntime(projectPath: string, branch: string, type: RuntimeTy
     runtimes.push(data);
   }
 
-  // Write to disk
+  // Async write
   const p = runtimeFilePath(projectPath, type, branch);
-  ensureDir(dirname(p));
-  writeFileSync(p, JSON.stringify(data, null, 2), "utf-8");
+  scheduleDiskWrite(p, JSON.stringify(data, null, 2), dirname(p));
 }
 
 export function listRuntimes(projectPath: string): RuntimeData[] {
@@ -910,16 +1035,24 @@ export function runtimeSlotId(branch: string): string {
 // ---------------------------------------------------------------------------
 
 export function appendLog(projectPath: string, name: string, line: string): void {
-  ensureDir(logsDir(projectPath));
-  const logPath = join(logsDir(projectPath), `${name}.log`);
+  const dir = logsDir(projectPath);
+  const logPath = join(dir, `${name}.log`);
   const ts = new Date().toISOString();
-  appendFileSync(logPath, `[${ts}] ${line}\n`, "utf-8");
+  bufferAppend(logPath, `[${ts}] ${line}\n`, dir);
 }
 
 export function readLog(projectPath: string, name: string, tail: number = 100): string {
   const logPath = join(logsDir(projectPath), `${name}.log`);
-  if (!existsSync(logPath)) return "";
-  const content = readFileSync(logPath, "utf-8");
+  let content = "";
+  if (existsSync(logPath)) {
+    content = readFileSync(logPath, "utf-8");
+  }
+  // Include buffered (not yet flushed) lines
+  const buffered = _logBuffers.get(logPath);
+  if (buffered && buffered.length > 0) {
+    content += buffered.join("");
+  }
+  if (!content) return "";
   const lines = content.split("\n").filter(Boolean);
   return lines.slice(-tail).join("\n");
 }
@@ -1420,15 +1553,22 @@ function messagesFilePath(projectPath: string, issueId: string): string {
 
 export function appendMessage(projectPath: string, issueId: string, role: "human" | "agent", text: string): void {
   const filePath = messagesFilePath(projectPath, issueId);
-  ensureDir(dirname(filePath));
   const msg: ChatMessage = { role, text, ts: new Date().toISOString() };
-  appendFileSync(filePath, JSON.stringify(msg) + "\n", "utf-8");
+  bufferAppend(filePath, JSON.stringify(msg) + "\n", dirname(filePath));
 }
 
 export function getMessages(projectPath: string, issueId: string): ChatMessage[] {
   const filePath = messagesFilePath(projectPath, issueId);
-  if (!existsSync(filePath)) return [];
-  const content = readFileSync(filePath, "utf-8");
+  let content = "";
+  if (existsSync(filePath)) {
+    content = readFileSync(filePath, "utf-8");
+  }
+  // Include buffered (not yet flushed) lines for this file
+  const buffered = _logBuffers.get(filePath);
+  if (buffered && buffered.length > 0) {
+    content += buffered.join("");
+  }
+  if (!content) return [];
   return content
     .split("\n")
     .filter(Boolean)
@@ -1444,7 +1584,7 @@ export function deleteMessage(projectPath: string, issueId: string, index: numbe
   if (index < 0 || index >= messages.length) return;
   messages.splice(index, 1);
   const filePath = messagesFilePath(projectPath, issueId);
-  writeFileSync(filePath, messages.map((m) => JSON.stringify(m)).join("\n") + "\n", "utf-8");
+  scheduleDiskWrite(filePath, messages.map((m) => JSON.stringify(m)).join("\n") + "\n", dirname(filePath));
 }
 
 export function rewriteTaskMdInstructions(agentDir: string, messages: ChatMessage[]): void {
@@ -1457,7 +1597,7 @@ export function rewriteTaskMdInstructions(agentDir: string, messages: ChatMessag
   for (const msg of humanMsgs) {
     result += `\n\n## New instructions from human\n\n${msg.text}\n`;
   }
-  writeFileSync(taskMdPath, result, "utf-8");
+  scheduleDiskWrite(taskMdPath, result);
 }
 
 // ---------------------------------------------------------------------------

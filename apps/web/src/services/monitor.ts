@@ -59,11 +59,11 @@ async function doCheck(): Promise<void> {
   for (const project of projects) {
     const agents = store.listAgents(project.path);
 
-    // Detect externally merged branches for active agents
-    await detectExternalMerges(project, agents);
-
-    // Auto-rebase stopped agents that are behind default branch
-    await autoRebaseStoppedAgents(project, agents);
+    // Run merge detection and auto-rebase in parallel — they operate on disjoint sets
+    await Promise.all([
+      detectExternalMerges(project, agents),
+      autoRebaseStoppedAgents(project, agents),
+    ]);
 
     // Reconcile stale currentOperation (server crash recovery)
     reconcileStaleOperations(project, agents);
@@ -197,7 +197,8 @@ async function autoRebaseStoppedAgents(
       !s.git?.merged &&
       (s.git?.op === "idle" || !s.git?.op) &&
       s.trackerStatus !== "done" && s.trackerStatus !== "cancelled" &&
-      !a.currentOperation;
+      !a.currentOperation &&
+      !a.rebaseResult?.conflict; // don't retry if last rebase had conflicts
   });
   if (candidates.length === 0) return;
 
@@ -301,20 +302,41 @@ function reconcileStaleOperations(
   agents: store.AgentData[],
 ): void {
   for (const agent of agents) {
-    if (!agent.currentOperation?.startedAt) continue;
-    const elapsed = Date.now() - new Date(agent.currentOperation.startedAt).getTime();
-    if (elapsed <= STALE_OP_MS) continue;
+    // 1. Clear stale currentOperation (server crash during operation)
+    if (agent.currentOperation?.startedAt) {
+      const elapsed = Date.now() - new Date(agent.currentOperation.startedAt).getTime();
+      if (elapsed > STALE_OP_MS) {
+        const reason = `stale ${agent.currentOperation.name} after ${Math.round(elapsed / 1000)}s (server crash recovery)`;
+        cmd.logInfo(SRC, `${agent.issueId}: ${reason} → clearing`);
 
-    const reason = `stale ${agent.currentOperation.name} after ${Math.round(elapsed / 1000)}s (server crash recovery)`;
-    cmd.logInfo(SRC, `${agent.issueId}: ${reason} → clearing`);
+        const agg = tryGetAggregate(project.name, agent.issueId);
+        if (agg) {
+          agg.clearStaleOperation(reason);
+        } else {
+          agent.currentOperation = null;
+          if (agent.state?.git?.op && agent.state.git.op !== "idle") agent.state.git.op = "idle";
+          if (agent.state?.transition) agent.state.transition = null;
+          store.saveAgent(project.path, agent.issueId, agent);
+          store.appendLog(project.path, `agent-${agent.issueId}-lifecycle`, `cleared stale operation: ${reason}`);
+        }
+      }
+      continue;
+    }
 
-    const agg = tryGetAggregate(project.name, agent.issueId);
-    if (agg) {
-      agg.clearStaleOperation(reason);
-    } else {
-      agent.currentOperation = null;
-      store.saveAgent(project.path, agent.issueId, agent);
-      store.appendLog(project.path, `agent-${agent.issueId}-lifecycle`, `cleared stale currentOperation: ${reason}`);
+    // 2. Clear stuck git.op without currentOperation (crash mid-rebase/merge, operation was never recorded)
+    if (agent.state?.git?.op && agent.state.git.op !== "idle" && !agent.currentOperation) {
+      const reason = `stuck git.op="${agent.state.git.op}" with no currentOperation (crash recovery)`;
+      cmd.logInfo(SRC, `${agent.issueId}: ${reason} → resetting to idle`);
+
+      const agg = tryGetAggregate(project.name, agent.issueId);
+      if (agg) {
+        agg.clearStaleOperation(reason);
+      } else {
+        agent.state.git.op = "idle";
+        if (agent.state.transition) agent.state.transition = null;
+        store.saveAgent(project.path, agent.issueId, agent);
+        store.appendLog(project.path, `agent-${agent.issueId}-lifecycle`, `cleared stuck state: ${reason}`);
+      }
     }
   }
 }
