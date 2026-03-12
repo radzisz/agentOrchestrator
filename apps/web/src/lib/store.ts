@@ -401,12 +401,17 @@ function ensureDir(dir: string): void {
 // Cache is populated lazily on first access per entity.
 // ---------------------------------------------------------------------------
 
-let _appConfig: AppConfig | null = null;
-const _projectConfigs = new Map<string, ProjectConfig>();          // projectPath → config
-const _agents = new Map<string, Map<string, AgentData>>();         // projectPath → (issueId → agent)
-const _agentsLoaded = new Set<string>();                           // projectPaths where agents are fully loaded
-const _runtimes = new Map<string, RuntimeData[]>();                // projectPath → runtime[]
-const _runtimesLoaded = new Set<string>();                         // projectPaths where runtimes are fully loaded
+// Use globalThis so cache survives Next.js hot module replacement in dev mode.
+// Without this, module re-evaluation creates fresh Maps while old module instances
+// still reference their own (stale) Maps — causing split-brain between API routes and SSR.
+function getGlobal<T>(key: string, factory: () => T): T {
+  return ((globalThis as any)[key] ??= factory());
+}
+const _projectConfigs = getGlobal("__store_projectConfigs__", () => new Map<string, ProjectConfig>());
+const _agents = getGlobal("__store_agents__", () => new Map<string, Map<string, AgentData>>());
+const _agentsLoaded = getGlobal("__store_agentsLoaded__", () => new Set<string>());
+const _runtimes = getGlobal("__store_runtimes__", () => new Map<string, RuntimeData[]>());
+const _runtimesLoaded = getGlobal("__store_runtimesLoaded__", () => new Set<string>());
 
 /** Force reload from disk on next access. Call from force-refresh endpoint. */
 export function invalidateCache(projectPath?: string): void {
@@ -417,8 +422,8 @@ export function invalidateCache(projectPath?: string): void {
     _runtimes.delete(projectPath);
     _projectConfigs.delete(projectPath);
   } else {
-    _appConfig = null;
-    _appConfigMtimeMs = 0;
+    _configCache.config = null;
+    _configCache.mtimeMs = 0;
     _projectConfigs.clear();
     _agents.clear();
     _agentsLoaded.clear();
@@ -437,50 +442,52 @@ const DEFAULT_CONFIG: AppConfig = {
   nextPortSlot: 0,
 };
 
-// Track mtime so we detect external writes (e.g. API route updated config
-// but SSR is reading from a separate module instance with stale cache).
-let _appConfigMtimeMs = 0;
+// AppConfig cache — on globalThis to survive Next.js HMR / multiple module instances.
+const _configCache = getGlobal("__store_configCache__", () => ({
+  config: null as AppConfig | null,
+  mtimeMs: 0,
+}));
 
 export function getConfig(): AppConfig {
   // Check if config file changed on disk since our last read.
   // This is cheap (one statSync) and fixes stale cache across Next.js
   // module instances (API routes vs SSR share the same file, but not memory).
-  if (_appConfig && existsSync(CONFIG_PATH)) {
+  if (_configCache.config && existsSync(CONFIG_PATH)) {
     const diskMtime = statSync(CONFIG_PATH).mtimeMs;
-    if (diskMtime > _appConfigMtimeMs) {
-      _appConfig = null; // force re-read
+    if (diskMtime > _configCache.mtimeMs) {
+      _configCache.config = null; // force re-read
     }
   }
 
-  if (_appConfig) return _appConfig;
+  if (_configCache.config) return _configCache.config;
 
   if (!existsSync(CONFIG_PATH)) {
-    _appConfig = { ...DEFAULT_CONFIG };
-    saveConfig(_appConfig);
-    return _appConfig;
+    _configCache.config = { ...DEFAULT_CONFIG };
+    saveConfig(_configCache.config);
+    return _configCache.config;
   }
-  _appConfigMtimeMs = statSync(CONFIG_PATH).mtimeMs;
-  _appConfig = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+  _configCache.mtimeMs = statSync(CONFIG_PATH).mtimeMs;
+  _configCache.config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
   // Auto-migrate secrets on first load
-  migrateSecretsIfNeeded(_appConfig!);
+  migrateSecretsIfNeeded(_configCache.config!);
   // Merge secrets from .env.secrets into in-memory config
   const secrets = readSecrets();
   if (Object.keys(secrets).length > 0) {
-    mergeSecrets(_appConfig!, secrets);
+    mergeSecrets(_configCache.config!, secrets);
   }
-  return _appConfig!;
+  return _configCache.config!;
 }
 
 export function saveConfig(config: AppConfig): void {
   const { cleaned, secrets } = stripSecrets(deepClone(config));
   writeSecrets(secrets);
-  _appConfig = config; // cache with secrets in-memory
+  _configCache.config = config; // cache with secrets in-memory
   // Config.json is written synchronously — it's infrequent (project add/remove,
   // integration config changes) and must survive Next.js hot reload / module re-eval
-  // where in-memory _appConfig is lost and the file must be up to date.
+  // where in-memory cache is lost and the file must be up to date.
   ensureDir(CONFIG_DIR);
   writeFileSync(CONFIG_PATH, JSON.stringify(cleaned, null, 2), "utf-8");
-  _appConfigMtimeMs = statSync(CONFIG_PATH).mtimeMs;
+  _configCache.mtimeMs = statSync(CONFIG_PATH).mtimeMs;
 }
 
 // ---------------------------------------------------------------------------

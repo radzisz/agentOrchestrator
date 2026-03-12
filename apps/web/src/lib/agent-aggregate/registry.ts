@@ -5,7 +5,12 @@
 import * as store from "@/lib/store";
 import { AgentAggregate } from "./aggregate";
 
-const aggregates = new Map<string, AgentAggregate>();
+// Use globalThis to survive Next.js hot module replacement in dev mode.
+// Without this, module re-evaluation creates a fresh Map while the old one
+// (with stale aggregates) may still be referenced by other module instances.
+const GLOBAL_KEY = "__agent_aggregates__";
+const aggregates: Map<string, AgentAggregate> =
+  (globalThis as any)[GLOBAL_KEY] ??= new Map<string, AgentAggregate>();
 
 function key(projectName: string, issueId: string): string {
   return `${projectName}:${issueId}`;

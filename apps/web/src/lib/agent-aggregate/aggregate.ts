@@ -384,6 +384,9 @@ export class AgentAggregate {
 
   /** Refresh all state axes by checking actual system state. */
   async refreshAgent(opts?: { force?: boolean }): Promise<void> {
+    // Skip refresh while an operation is running — checking git/container
+    // during merge/rebase/spawn causes lock contention and freezes the event loop
+    if (this._agent.currentOperation && !opts?.force) return;
     const now = Date.now();
     if (!opts?.force && now - this._lastRefreshAt < 10_000) return;
     if (this._refreshPromise) return this._refreshPromise;

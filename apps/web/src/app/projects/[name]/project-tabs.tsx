@@ -60,6 +60,18 @@ export function ProjectTabs({
   const paramTab = searchParams.get("tab") as Tab | null;
   const tab: Tab = paramTab && TABS.includes(paramTab) ? paramTab : "cdm";
   const agentsRefreshRef = useRef<(() => void) | null>(null);
+  const [pendingAgentsRefresh, setPendingAgentsRefresh] = useState(false);
+
+  // When switching to agents tab after task submission, wait for the panel to mount
+  // and then trigger refresh. router.push is async so searchParams don't update immediately.
+  useEffect(() => {
+    if (pendingAgentsRefresh && tab === "agents") {
+      setPendingAgentsRefresh(false);
+      // Small delay so LocalBranchesPanel mounts and sets agentsRefreshRef
+      const t = setTimeout(() => agentsRefreshRef.current?.(), 200);
+      return () => clearTimeout(t);
+    }
+  }, [pendingAgentsRefresh, tab]);
 
   const setTab = useCallback((t: Tab) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -143,9 +155,8 @@ export function ProjectTabs({
       <div className="p-6">
         {tab === "cdm" && (
           <CdmTab projectName={project.name} onTaskSubmitted={() => {
+            setPendingAgentsRefresh(true);
             setTab("agents");
-            // Trigger refresh if agents panel is already mounted (it will mount after setTab)
-            setTimeout(() => agentsRefreshRef.current?.(), 100);
           }} />
         )}
         {tab === "agents" && (

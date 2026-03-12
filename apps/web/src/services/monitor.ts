@@ -59,18 +59,25 @@ async function doCheck(): Promise<void> {
   for (const project of projects) {
     const agents = store.listAgents(project.path);
 
-    // Run merge detection and auto-rebase in parallel — they operate on disjoint sets
-    await Promise.all([
-      detectExternalMerges(project, agents),
-      autoRebaseStoppedAgents(project, agents),
-    ]);
-
-    // Reconcile stale currentOperation (server crash recovery)
+    // Reconcile stale currentOperation (server crash recovery) — cheap, no I/O
     reconcileStaleOperations(project, agents);
+
+    // Skip heavy git operations on project repo if any agent has an active operation
+    // (merge/rebase/spawn hold git locks on the project repo — concurrent git commands
+    // would block on index.lock, starving the event loop and freezing the entire UI)
+    const hasActiveOp = agents.some((a) => !!a.currentOperation);
+    if (!hasActiveOp) {
+      await Promise.all([
+        detectExternalMerges(project, agents),
+        autoRebaseStoppedAgents(project, agents),
+      ]);
+    }
 
     await Promise.all(agents.map(async (agent) => {
       if (agent.state?.lifecycle !== "active" && agent.state?.lifecycle !== "spawning") return;
       if (!agent.agentDir || !existsSync(`${agent.agentDir}/.git`)) return;
+      // Skip agents with active operations — their git/container state is in flux
+      if (agent.currentOperation) return;
 
       // Seed lastSeen from persisted state so we don't re-emit after server restart
       const commitKey = `${project.name}/${agent.issueId}`;
