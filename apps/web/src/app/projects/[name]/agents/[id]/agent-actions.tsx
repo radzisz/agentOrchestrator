@@ -144,7 +144,7 @@ export function AgentActions({
         body: JSON.stringify({ action: "merge", cleanup: cleanupOnMerge, closeIssue: closeIssueOnMerge }),
       });
       if (cleanupOnMerge) {
-        window.location.href = `/projects/${projectName}`;
+        window.location.href = `/projects/${projectName}?tab=agents`;
       } else {
         window.location.reload();
       }
@@ -252,7 +252,7 @@ export function AgentActions({
         body: JSON.stringify({ action: "reject", cleanup: cleanupOnReject, closeIssue: closeIssueOnReject }),
       });
       if (cleanupOnReject) {
-        window.location.href = `/projects/${projectName}`;
+        window.location.href = `/projects/${projectName}?tab=agents`;
       } else {
         window.location.reload();
       }
@@ -269,7 +269,7 @@ export function AgentActions({
       if (!deleteBranchOnRemove) params.set("deleteBranch", "false");
       const qs = params.toString() ? `?${params}` : "";
       await fetch(`/api/agents/${agentId}${qs}`, { method: "DELETE" });
-      window.location.href = `/projects/${projectName}`;
+      window.location.href = `/projects/${projectName}?tab=agents`;
     } finally {
       setActionLoading(false);
     }

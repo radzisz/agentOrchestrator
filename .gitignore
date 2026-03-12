@@ -14,3 +14,4 @@ next-env.d.ts
 agent-output.log
 .agent-container
 messages.jsonl
+apps/web/.cmd-logs/*

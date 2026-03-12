@@ -125,7 +125,7 @@ export function LocalBranchesPanel({
   onRefreshRef?: React.MutableRefObject<(() => void) | null>;
 }) {
   const [branches, setBranches] = useState<LocalBranchInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [initialLoad, setInitialLoad] = useState(true);   // true until first successful fetch
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [logsOpen, setLogsOpen] = useState<string | null>(null);
@@ -134,6 +134,7 @@ export function LocalBranchesPanel({
   const [hideMerged, setHideMerged] = useState(true);
   const [sortBy, setSortBy] = useState<"code" | "created" | "updated">("updated");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [refreshing, setRefreshing] = useState(false);
   const [reconciling, setReconciling] = useState<string | null>(null);
 
   // Dialogs
@@ -166,7 +167,6 @@ export function LocalBranchesPanel({
   }, [hasTransient, recentMount, projectName]);
 
   async function loadBranches() {
-    setLoading(true);
     setError(null);
     try {
       const resp = await fetch(`/api/projects/${projectName}/local-branches`);
@@ -179,7 +179,7 @@ export function LocalBranchesPanel({
     } catch {
       setError("Failed to load local branches");
     } finally {
-      setLoading(false);
+      setInitialLoad(false);
     }
   }
 
@@ -299,10 +299,7 @@ export function LocalBranchesPanel({
   // Render
   // ---------------------------------------------------------------------------
 
-  // Auto-show closed if ALL agents are closed (otherwise you see empty list)
-  const isTerminal = (s?: string) => s === "closed" || s === "closing";
-  const allClosed = branches.length > 0 && branches.every((b) => isTerminal(b.agentUiStatus?.status));
-  const effectiveHideMerged = hideMerged && !allClosed;
+  const effectiveHideMerged = hideMerged;
 
   const filteredBranches = branches
     .filter((b) => {
@@ -395,10 +392,15 @@ export function LocalBranchesPanel({
           )}
 
           <Button variant="ghost" size="sm" className="ml-auto" onClick={async () => {
-            await fetch(`/api/projects/${projectName}/refresh`, { method: "POST" });
-            loadBranches();
-          }} disabled={loading}>
-            {loading
+            setRefreshing(true);
+            try {
+              await fetch(`/api/projects/${projectName}/refresh`, { method: "POST" });
+              await loadBranches();
+            } finally {
+              setRefreshing(false);
+            }
+          }} disabled={refreshing}>
+            {refreshing
               ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
               : <RefreshCw className="h-3.5 w-3.5" />}
           </Button>
@@ -407,7 +409,7 @@ export function LocalBranchesPanel({
     </div>
   );
 
-  if (loading && branches.length === 0) {
+  if (initialLoad) {
     return (
       <div>
         {header}

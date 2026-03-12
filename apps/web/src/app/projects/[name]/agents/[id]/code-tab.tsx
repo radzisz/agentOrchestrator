@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { useAgentState } from "./agent-state-context";
 import {
   AlertTriangle,
   Check,
@@ -989,6 +990,30 @@ export function CodeTab({
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // Auto-refresh when an external rebase/merge completes (e.g. auto-rebase by monitor).
+  // Watches agent state context — when git.op transitions from active to idle,
+  // or currentOp (rebase/merge) clears, refresh the diff view.
+  const { state: agentState, currentOp } = useAgentState();
+  const prevGitOp = useRef(agentState?.git?.op);
+  const prevCurrentOp = useRef(currentOp);
+
+  useEffect(() => {
+    const wasActive = prevGitOp.current === "rebasing" || prevGitOp.current === "merging"
+      || prevCurrentOp.current?.name === "rebase" || prevCurrentOp.current?.name === "merge";
+    const nowIdle = agentState?.git?.op === "idle" || !agentState?.git?.op;
+    const opCleared = !currentOp;
+
+    prevGitOp.current = agentState?.git?.op;
+    prevCurrentOp.current = currentOp;
+
+    if (wasActive && nowIdle && opCleared) {
+      // External rebase/merge finished — refresh code view
+      if (rebaseState === "idle" || rebaseState === "done") {
+        fetchData();
+      }
+    }
+  }, [agentState?.git?.op, currentOp, fetchData, rebaseState]);
 
   // Escape key closes fullscreen
   useEffect(() => {
