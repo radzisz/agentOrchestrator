@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { stripImages } from "@/lib/markdown-images";
 
 interface UiStatus {
   status: "starting" | "running" | "awaiting" | "closing" | "closed";
@@ -73,7 +74,7 @@ export function AgentCard({ agent }: AgentCardProps) {
             {uiStatusLabel(ui)}
           </Badge>
         </div>
-        <p className="text-sm text-muted-foreground truncate">{agent.title}</p>
+        <p className="text-sm text-muted-foreground truncate">{stripImages(agent.title)}</p>
       </CardHeader>
       <CardContent>
         <div className="flex flex-col gap-1 text-xs text-muted-foreground">

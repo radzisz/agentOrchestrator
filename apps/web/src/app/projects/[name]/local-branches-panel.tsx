@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { GitBranch, Bot, GitFork, Info, Loader2, Container, Search, RefreshCw, ArrowUpDown } from "lucide-react";
 import { ServiceLink } from "@/components/service-link";
+import { stripImages } from "@/lib/markdown-images";
 
 // ---------------------------------------------------------------------------
 // Types (matching API response + BranchesPanel runtime shape)
@@ -536,7 +537,7 @@ export function LocalBranchesPanel({
                       href={`/projects/${projectName}/agents/${branch.agentId}`}
                       className="text-xs text-muted-foreground truncate mt-0.5 block hover:underline"
                     >
-                      {branch.agentTitle}
+                      {stripImages(branch.agentTitle)}
                       {branch.agentCreatedBy && (
                         <span className="text-[11px] ml-2 opacity-60">by {branch.agentCreatedBy}</span>
                       )}

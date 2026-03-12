@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { AgentCard } from "@/components/agent-card";
 import { Badge } from "@/components/ui/badge";
+import { stripImages } from "@/lib/markdown-images";
 
 type ViewMode = "grid" | "list";
 
@@ -117,7 +118,7 @@ export function DashboardAgents({ agents }: { agents: AgentItem[] }) {
               >
                 <span className={`w-2 h-2 rounded-full shrink-0 ${uiStatusColors[ui.status] || "bg-gray-500"}`} />
                 <span className="font-medium text-sm w-28 shrink-0">{agent.issueId}</span>
-                <span className="text-sm text-muted-foreground truncate flex-1">{agent.title}</span>
+                <span className="text-sm text-muted-foreground truncate flex-1">{stripImages(agent.title)}</span>
                 {agent.projectName && (
                   <span className="text-xs text-muted-foreground shrink-0">{agent.projectName}</span>
                 )}
