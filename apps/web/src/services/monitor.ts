@@ -51,7 +51,7 @@ async function check(): Promise<void> {
 }
 
 async function doCheck(): Promise<void> {
-  const projects = store.listProjects();
+  const projects = store.listProjects().filter((p) => !p.archived);
 
   // Batch: get all running containers once
   const runningContainers = await cmd.getRunningContainers({ source: SRC });

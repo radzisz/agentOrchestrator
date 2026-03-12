@@ -80,7 +80,7 @@ function scheduleNext(delayMs: number): void {
 }
 
 async function tick(): Promise<void> {
-  const projects = store.listProjects();
+  const projects = store.listProjects().filter((p) => !p.archived);
 
   // Process projects in parallel — they are independent
   await Promise.all(

@@ -5,6 +5,7 @@
 export interface ProjectEntry {
   name: string;
   path: string;
+  archived?: boolean;
 }
 
 export interface TrackerInstance {
