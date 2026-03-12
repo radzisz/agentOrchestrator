@@ -26,6 +26,7 @@ export default async function ProjectsPage() {
     return {
       name: project.name,
       path: project.path,
+      archived: project.archived || false,
       repoUrl: cfg.REPO_URL || null,
       hasGit: existsSync(join(project.path, ".git")),
       running,

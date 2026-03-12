@@ -18,6 +18,7 @@ export async function GET(
   return NextResponse.json({
     name: project.name,
     path: project.path,
+    archived: project.archived || false,
     config: cfg,
     agents,
     runtimes,

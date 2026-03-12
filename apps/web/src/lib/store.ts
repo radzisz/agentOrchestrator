@@ -120,6 +120,7 @@ if (typeof process !== "undefined") {
 export interface ProjectEntry {
   name: string;
   path: string;
+  archived?: boolean;
 }
 
 export interface TrackerInstance {
@@ -622,6 +623,14 @@ export function addProject(entry: ProjectEntry): void {
 export function removeProject(name: string): void {
   const config = getConfig();
   config.projects = config.projects.filter((p) => p.name !== name);
+  saveConfig(config);
+}
+
+export function setProjectArchived(name: string, archived: boolean): void {
+  const config = getConfig();
+  const project = config.projects.find((p) => p.name === name);
+  if (!project) return;
+  project.archived = archived || undefined; // omit key when false
   saveConfig(config);
 }
 

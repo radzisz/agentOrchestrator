@@ -13,11 +13,12 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { LayoutGrid, List, Trash2, FolderOpen, AlertTriangle, Star } from "lucide-react";
+import { LayoutGrid, List, Trash2, FolderOpen, AlertTriangle, Star, Archive, ArchiveRestore } from "lucide-react";
 
 interface ProjectData {
   name: string;
   path: string;
+  archived: boolean;
   repoUrl: string | null;
   hasGit: boolean;
   running: number;
@@ -49,10 +50,28 @@ function ProjectIcon({ name, size = 24 }: { name: string; size?: number }) {
 export function ProjectList({ projects }: { projects: ProjectData[] }) {
   const router = useRouter();
   const [view, setView] = useState<"grid" | "list">("grid");
+  const [showArchived, setShowArchived] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [archiving, setArchiving] = useState<string | null>(null);
   const [starred, setStarred] = useState<Set<string>>(new Set());
+
+  async function toggleArchive(name: string, currentlyArchived: boolean) {
+    setArchiving(name);
+    try {
+      await fetch(`/api/projects/${name}/archive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ archived: !currentlyArchived }),
+      });
+      router.refresh();
+    } catch {
+      // ignore
+    } finally {
+      setArchiving(null);
+    }
+  }
 
   async function confirmDelete() {
     if (!deleteTarget) return;
@@ -90,7 +109,10 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
     });
   }
 
-  const sorted = [...projects].sort((a, b) => {
+  const filtered = projects.filter((p) => showArchived ? p.archived : !p.archived);
+  const hasArchived = projects.some((p) => p.archived);
+
+  const sorted = [...filtered].sort((a, b) => {
     const aS = starred.has(a.name) ? 0 : 1;
     const bS = starred.has(b.name) ? 0 : 1;
     return aS - bS;
@@ -103,23 +125,36 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-end gap-1">
-        <Button
-          variant={view === "grid" ? "secondary" : "ghost"}
-          size="sm"
-          className="h-7 w-7 p-0"
-          onClick={() => toggleView("grid")}
-        >
-          <LayoutGrid className="h-3.5 w-3.5" />
-        </Button>
-        <Button
-          variant={view === "list" ? "secondary" : "ghost"}
-          size="sm"
-          className="h-7 w-7 p-0"
-          onClick={() => toggleView("list")}
-        >
-          <List className="h-3.5 w-3.5" />
-        </Button>
+      <div className="flex items-center justify-end gap-2">
+        {hasArchived && (
+          <Button
+            variant={showArchived ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 gap-1.5 text-xs"
+            onClick={() => setShowArchived(!showArchived)}
+          >
+            <Archive className="h-3.5 w-3.5" />
+            {showArchived ? "Archived" : "Show archived"}
+          </Button>
+        )}
+        <div className="flex items-center gap-1">
+          <Button
+            variant={view === "grid" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 w-7 p-0"
+            onClick={() => toggleView("grid")}
+          >
+            <LayoutGrid className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant={view === "list" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 w-7 p-0"
+            onClick={() => toggleView("list")}
+          >
+            <List className="h-3.5 w-3.5" />
+          </Button>
+        </div>
       </div>
 
       {view === "grid" ? (
@@ -171,6 +206,16 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
                       onClick={(e) => { e.stopPropagation(); toggleStar(p.name); }}
                     >
                       <Star className={`h-3.5 w-3.5 ${starred.has(p.name) ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground"}`} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 w-7 p-0 text-muted-foreground"
+                      title={p.archived ? "Unarchive" : "Archive"}
+                      disabled={archiving === p.name}
+                      onClick={(e) => { e.stopPropagation(); toggleArchive(p.name, p.archived); }}
+                    >
+                      {p.archived ? <ArchiveRestore className="h-3.5 w-3.5" /> : <Archive className="h-3.5 w-3.5" />}
                     </Button>
                     <Button
                       variant="ghost"
@@ -239,6 +284,16 @@ export function ProjectList({ projects }: { projects: ProjectData[] }) {
                   onClick={(e) => { e.stopPropagation(); toggleStar(p.name); }}
                 >
                   <Star className={`h-3.5 w-3.5 ${starred.has(p.name) ? "fill-yellow-400 text-yellow-400" : "text-muted-foreground"}`} />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 p-0 text-muted-foreground"
+                  title={p.archived ? "Unarchive" : "Archive"}
+                  disabled={archiving === p.name}
+                  onClick={(e) => { e.stopPropagation(); toggleArchive(p.name, p.archived); }}
+                >
+                  {p.archived ? <ArchiveRestore className="h-3.5 w-3.5" /> : <Archive className="h-3.5 w-3.5" />}
                 </Button>
                 <Button
                   variant="ghost"
